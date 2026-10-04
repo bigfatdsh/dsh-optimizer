@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ROUTE_PATH, SECTION_NAME, SECTION_ORDER, apply, inject, name } from '../lib/index.js'
+import { statePath } from '../lib/state.js'
 import { DIRECTIVE, resolveDirective } from '../lib/directive.js'
 
 /**
@@ -25,7 +26,27 @@ function fakeHost(options = {}) {
   const sections = []
   const routes = []
   const logs = []
+  const listeners = new Map()
   const services = {}
+  if (options.projections !== undefined) {
+    services.sessionProjections = {
+      stateOf: (session) => options.projections(session),
+    }
+  }
+  if (options.models !== undefined) {
+    const table = new Map(options.models.map((model) => [model.id, model]))
+    services.llm = {
+      async resolveModelInfo(_provider, model) {
+        const found = table.get(model)
+        if (found === undefined) throw new Error(`no such model: ${model}`)
+        return found
+      },
+      async listModels() {
+        // 真实行为：目录投影**故意不含** reasoning。旧实现就是被这一点坑到的。
+        return options.models.map(({ id, name }) => ({ id, name: name ?? id }))
+      },
+    }
+  }
   if (options.withSystemPrompt !== false) {
     services.systemPrompt = {
       section(entry) {
@@ -48,7 +69,24 @@ function fakeHost(options = {}) {
       fn()
       return () => {}
     },
+    on(event, handler) {
+      const list = listeners.get(event) ?? []
+      list.push(handler)
+      listeners.set(event, list)
+      return () => list.splice(list.indexOf(handler), 1)
+    },
     logger: { info: (m) => logs.push(m), warn: (m) => logs.push(`WARN ${m}`) },
+  }
+  /** 触发一个事件，按注册顺序串成 waterfall。 */
+  const fire = async (event, payload, next) => {
+    const list = listeners.get(event) ?? []
+    let chain = next
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const handler = list[index]
+      const downstream = chain
+      chain = () => handler(payload, downstream)
+    }
+    return chain()
   }
   const route = () => routes.find((entry) => entry.path === ROUTE_PATH)
   const read = async () => {
@@ -66,8 +104,33 @@ function fakeHost(options = {}) {
     await route().handler(request, { writeHead(status) { out.push(status) }, end(payload) { out.push(JSON.parse(payload.toString('utf8'))) } })
     return out
   }
-  return { ctx, sections, routes, logs, route, read, post }
+  return { ctx, sections, routes, logs, listeners, route, read, post, fire }
 }
+
+/** 一条用户消息。 */
+const userMessage = (text) => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })
+
+/**
+ * 走一步：先判组，再落地。
+ *
+ * turn/step 每次自增：同一个 (turn, step) 再来一次在宿主里不会发生，插件据此判断
+ * "这一轮没有新用户消息"。测试也必须照这个真实来。
+ */
+async function step(host, session, text, resolved) {
+  session.turn = (session.turn ?? 0) + 1
+  const position = { turn: session.turn, step: 1 }
+  await host.fire('agent/pre-step', { agent: { session }, messages: [userMessage(text)], ...position }, async () => ({ kind: 'enter' }))
+  return host.fire('agent/request', { agent: { session }, ...position }, async () => resolved)
+}
+
+/** DeepSeek 目录里的真实形状。 */
+const DEEPSEEK_MODELS = [{
+  id: 'deepseek-chat',
+  reasoning: {
+    efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }],
+    defaultEffort: 'high',
+  },
+}]
 
 /** 一份临时 DSH 主目录，避免写到真实 home。 */
 async function withTempHome(fn) {
@@ -123,15 +186,19 @@ test('开关：GET 报状态与登记表，POST 写入并回报', async () => {
     const handle = apply(host.ctx, { conciseDefault: true, log: false })
     const initial = await host.read()
     assert.equal(initial.enabled, true, 'conciseDefault: true 时首次就是开')
-    assert.equal(initial.switches.length, 1)
-    assert.deepEqual(initial.switches[0], {
-      id: 'concise',
-      label: { zh: '精简化输出', en: 'Concise output' },
-      hint: initial.switches[0].hint,
-      endpoint: ROUTE_PATH,
-      field: 'enabled',
-    })
+    // 面板读的是登记表：两个开关，各一个字段，字段名不能重复。
+    assert.deepEqual(initial.switches.map((item) => item.field), ['auto', 'enabled'])
+    assert.deepEqual(initial.switches.map((item) => item.endpoint), [ROUTE_PATH, ROUTE_PATH])
+    assert.equal(initial.auto, true, 'autoDefault 默认开')
     assert.equal(initial.config.section, SECTION_NAME)
+
+    // auto 开关独立读写，不串到精简化那个字段。
+    const autoOff = await host.post({ auto: false })
+    assert.equal(autoOff[1].auto, false)
+    assert.equal(autoOff[1].enabled, true, '关 auto 不该关掉精简化')
+    assert.equal(handle.autoState.get(), false)
+    assert.equal((await host.read()).auto, false)
+    assert.equal((await host.post({ auto: true }))[1].auto, true)
 
     const off = await host.post({ enabled: false })
     assert.equal(off[0], 200)
@@ -223,4 +290,183 @@ test('统计：只记数字，装配次数与注入次数都对得上', async ()
     text()
     assert.deepEqual(handle.stats.snapshot(), { assembled: 3, injected: 1 })
   })
+})
+
+// --- 推理等级 auto：必须成立的行为 ------------------------------------------
+
+test('auto：重活抬到 max，闲聊压到 off，提问落 low', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(host.ctx, { conciseDefault: false, autoDefault: true, persist: false })
+  const call = (text, resolved) => step(host, {}, text, resolved)
+  const base = { provider: 'deepseek', model: 'deepseek-chat' }
+
+  assert.equal((await call('帮我从零搭建一套订单系统的架构设计，要考虑分库分表和缓存策略', { ...base, reasoningEffort: 'high' })).reasoningEffort, 'max')
+  assert.equal((await call('你好', base)).reasoningEffort, 'off')
+  assert.equal((await call('什么是防抖', base)).reasoningEffort, 'low')
+})
+
+test('auto 关掉后一个字段都不动，且是同一个对象', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(host.ctx, { autoDefault: false, persist: false })
+  const resolved = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }
+  const after = await step(host, {}, '帮我从零重写整个鉴权模块', resolved)
+  assert.equal(after, resolved, '必须原样返回同一个对象')
+})
+
+test('auto：模型不支持推理时透传，不抛错', async () => {
+  const host = fakeHost({ models: [{ id: 'plain', reasoning: undefined }] })
+  apply(host.ctx, { autoDefault: true, persist: false })
+  const resolved = { provider: 'deepseek', model: 'plain' }
+  assert.deepEqual(await step(host, {}, '帮我改一下这个函数', resolved), resolved)
+})
+
+test('auto：目录投影（listModels）里没有 reasoning 时不会被当成"不支持推理"', async () => {
+  // 这是真实踩过的坑：listModels 只给 provider/id/name/description/inputModalities。
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  const handle = apply(host.ctx, { autoDefault: true, persist: false })
+  const applied = await step(host, {}, '帮我从零重写整个鉴权模块', { provider: 'deepseek', model: 'deepseek-chat' })
+  assert.equal(applied.reasoningEffort, 'max')
+  assert.equal(handle.effortStats.snapshot().applied, 1)
+})
+
+test('auto：没有 llm 服务时透传，并保持其它功能', async () => {
+  const host = fakeHost()
+  const handle = apply(host.ctx, { autoDefault: true, persist: false })
+  const resolved = { provider: 'deepseek', model: 'deepseek-chat' }
+  assert.deepEqual(await step(host, {}, '帮我改一下这个函数', resolved), resolved)
+  assert.equal(handle.effortStats.snapshot().applied, 0)
+  assert.ok(handle.effortStats.snapshot().turns >= 1, '判组照常记录')
+})
+
+test('auto：用户在界面上手选时让位，并且永久停手', async () => {
+  let pending = false
+  const host = fakeHost({
+    models: DEEPSEEK_MODELS,
+    projections: () => (pending ? { lastUsed: null, pending: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'off' } } : null),
+  })
+  const handle = apply(host.ctx, { autoDefault: true, persist: false })
+  const session = {}
+  const base = { provider: 'deepseek', model: 'deepseek-chat' }
+
+  const first = await step(host, session, '帮我从零重写整个鉴权模块', { ...base, reasoningEffort: 'high' })
+  assert.equal(first.reasoningEffort, 'max', '第一次由插件定档')
+
+  // 界面产生了一次显式选择：插件必须让位。
+  pending = true
+  const second = await step(host, session, '你好', { ...base, reasoningEffort: 'off' })
+  assert.equal(second.reasoningEffort, 'off')
+  assert.equal(handle.ledger.of(session).manual, true)
+  assert.ok(handle.effortStats.snapshot().recent.some((entry) => entry.kind === 'yield'))
+
+  // 之后即使回到重活也不再改。
+  pending = false
+  const third = await step(host, session, '帮我从零重写整个鉴权模块', { ...base, reasoningEffort: 'off' })
+  assert.deepEqual(third, { ...base, reasoningEffort: 'off' })
+})
+
+test('auto：头里的档位变了不再被当成"用户手选"（这条曾经让 auto 永久停手）', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  const handle = apply(host.ctx, { autoDefault: true, persist: false })
+  const session = {}
+  const base = { provider: 'deepseek', model: 'deepseek-chat' }
+
+  // 第一轮：插件写 low（light 组）。
+  const first = await step(host, session, '什么是防抖', { ...base, reasoningEffort: 'max' })
+  assert.equal(first.reasoningEffort, 'low')
+  // 第二轮：持久化头里仍是 low，但用户没说任何话（投影里没有 pending）→ 插件必须继续改。
+  const second = await step(host, session, '帮我从零重写整个鉴权模块', { ...base, reasoningEffort: 'low' })
+  assert.equal(second.reasoningEffort, 'max')
+  assert.equal(handle.ledger.of(session).manual, false)
+})
+
+test('auto：续跑（没有新用户消息）不重新判，档位保持', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(host.ctx, { autoDefault: true, persist: false })
+  const agent = { session: {} }
+  await host.fire('agent/pre-step', { agent, messages: [userMessage('帮我从零重写整个鉴权模块')], turn: 1, step: 1 }, async () => ({ kind: 'enter' }))
+  await host.fire('agent/pre-step', { agent, messages: [], turn: 1, step: 2 }, async () => ({ kind: 'enter' }))
+  const applied = await host.fire('agent/request', { agent, turn: 1, step: 2 }, async () => ({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' }))
+  assert.equal(applied.reasoningEffort, 'max')
+})
+
+test('auto：force 与 levels 覆盖生效；不支持的档位被忽略', async () => {
+  const forced = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(forced.ctx, { autoDefault: true, persist: false, force: 'low' })
+  assert.equal((await step(forced, {}, '帮我从零重写整个鉴权模块', { provider: 'deepseek', model: 'deepseek-chat' })).reasoningEffort, 'low')
+
+  const bogus = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(bogus.ctx, { autoDefault: true, persist: false, force: '不存在' })
+  assert.equal((await step(bogus, {}, '你好', { provider: 'deepseek', model: 'deepseek-chat' })).reasoningEffort, 'off', '不认识的档位忽略后按判定走')
+
+  const mapped = fakeHost({ models: DEEPSEEK_MODELS })
+  apply(mapped.ctx, { autoDefault: true, persist: false, levels: { quiet: 'max' } })
+  assert.equal((await step(mapped, {}, '你好', { provider: 'deepseek', model: 'deepseek-chat' })).reasoningEffort, 'max')
+})
+
+test('auto：段落重名不让插件死掉，判定照常工作', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  host.ctx.get('systemPrompt').section = () => {
+    throw new Error('prompt section "optimizer:concise" is already registered')
+  }
+  apply(host.ctx, { autoDefault: true, persist: false })
+  assert.ok(host.logs.some((line) => line.includes('prompt section unavailable')), '要出声，不能静默')
+  const applied = await step(host, {}, '帮我从零重写整个鉴权模块', { provider: 'deepseek', model: 'deepseek-chat' })
+  assert.equal(applied.reasoningEffort, 'max')
+})
+
+test('auto：端点注册抛错也不让插件死掉', async () => {
+  const host = fakeHost({ models: DEEPSEEK_MODELS })
+  host.ctx.get('webServer').register = () => {
+    throw new Error('route already taken')
+  }
+  apply(host.ctx, { autoDefault: true, persist: false })
+  assert.ok(host.logs.some((line) => line.includes('toggle endpoint unavailable')))
+  const applied = await step(host, {}, '你好', { provider: 'deepseek', model: 'deepseek-chat' })
+  assert.equal(applied.reasoningEffort, 'off')
+})
+
+test('auto：两个开关共用一个状态文件，互相不覆盖', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'optimizer-'))
+  const file = statePath(home)
+  try {
+    await writeFile(file, '{"concise":true,"auto":true,"别的键":"保留"}', 'utf8')
+    const host = fakeHost({ models: DEEPSEEK_MODELS })
+    const handle = apply(host.ctx, { autoDefault: false, persist: true, file })
+    assert.equal(handle.state.get(), true, '构造时就同步读回（不等下一个 tick）')
+    assert.equal(handle.autoState.get(), true, 'auto 也要在第一个请求之前就位')
+    assert.equal(handle.autoState.get(), true, 'auto 也从同一个文件读回（缺省只影响没写过的键）')
+    await host.post({ auto: true })
+    const written = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(written.auto, true)
+    assert.equal(written.concise, true)
+    assert.equal(written['别的键'], '保留', '不认识的键必须留着')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('auto：messageText 只认用户文本', async () => {
+  const { messageText } = await import('../lib/index.js')
+  assert.equal(messageText(userMessage('你好')), '你好')
+  assert.equal(messageText({ role: 'user', content: 'plain' }), 'plain')
+  assert.equal(messageText({ role: 'user', source: { kind: 'tool' }, content: [{ type: 'text', text: '忽略我' }] }), '')
+  assert.equal(messageText({ role: 'user', content: [{ type: 'image' }] }), '')
+  assert.equal(messageText(undefined), '')
+  assert.equal(messageText(null), '')
+})
+
+test('auto：盘上的开关在**构造时**就位，第一个请求不会被默认值抢先', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'optimizer-'))
+  const file = statePath(home)
+  try {
+    // autoDefault 是 false，但盘上写着 true —— 真实值必须赢，而且立刻可用。
+    await writeFile(file, '{"auto":true,"concise":false}', 'utf8')
+    const host = fakeHost({ models: DEEPSEEK_MODELS })
+    const handle = apply(host.ctx, { autoDefault: false, persist: true, file })
+    assert.equal(handle.autoState.get(), true)
+    const applied = await step(host, {}, '帮我从零重写整个鉴权模块', { provider: 'deepseek', model: 'deepseek-chat' })
+    assert.equal(applied.reasoningEffort, 'max', '第一个请求就该生效')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 })
