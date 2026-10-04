@@ -1,0 +1,20 @@
+# dsh-optimizer —— 优化插件集 · DSH bundle 补丁。
+#
+# 只插入一行：把"精简化输出"挂到 Host 根部。
+#
+# 为什么在根部：系统提示词段落要在**所有** preset、所有会话、所有子代理上一致生效。
+# 这一段恒定排在提示词最后（order 10200），开关不变时逐字节稳定，不产生额外缓存失效。
+#
+# 默认值：
+#   * conciseDefault: false —— 首次装配默认关闭；在「优化」面板里点一下即开，之后状态
+#     记在 <DSH_HOME>/optimizer.json 里，重启后保持。
+#   * persist: true        —— 界面开关落盘。
+#   * log: false           —— 排查"到底注入没注入"时改成 true。
+
+- insert:
+    - id: concise
+      name: 'dsh-optimizer'
+      config:
+        conciseDefault: false
+        persist: true
+        log: false
