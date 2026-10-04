@@ -1,9 +1,9 @@
 {
   "name": "dsh-optimizer",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
-  "description": "优化插件集：把省 token 的开关收在一个「优化」面板里。当前含「精简化输出」——在系统提示词最后追加一段输出纪律，压掉开场白、复述与装饰性小节，任务内容一字不改；输入栏右侧「优化」图标开关，改动下一个模型步骤即生效。",
+  "description": "优化插件集：把省 token 的开关收在输入栏右侧的「优化」面板里。含「推理等级 auto」（每个请求按轻重自动选该模型真实支持的推理档位，手选优先、判不出就透传）与「精简化输出」（系统提示词最后追加一段输出纪律，任务内容一字不改）。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -26,16 +26,16 @@
     "lib/index.js",
     "lib/client.js",
     "lib/classify.js",
-    "lib/request.js",
+    "lib/efforts.js",
     "lib/schema.js",
     "lib/state.js",
-    "lib/efforts.js",
+    "lib/directive.js",
     "cordis.patch.yml",
     "README.md"
   ],
   "meta": {
-    "title": "推理等级 Auto Effort",
-    "description": "在请求发出前按任务轻重判定推理档位，落成该模型真正支持的 effort；判不出就停在原样，续跑不中途改口径。默认自动，可切成「仅未手动选择时生效」或完全关闭。"
+    "title": "优化插件集",
+    "description": "推理等级 auto + 精简化输出，一个面板两个开关；所有失败方向都是\"原样工作\"，不会让请求失败。"
   },
   "dsh": {
     "bundle": {
@@ -49,8 +49,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/plugin.test.js test/client.test.js",
-    "verify:client": "node tools/verify-client-bundle.mjs",
+    "test": "node --test test/classify.test.js test/efforts.test.js test/plugin.test.js test/client.test.js",
     "verify": "node tools/verify-client-bundle.mjs"
   }
 }
