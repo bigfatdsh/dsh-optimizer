@@ -46,6 +46,28 @@
 两者都是"读参数、调 `next()`"的形态。**不包任何模型调用路径、不改模型目录、不改模型
 选择器的 DOM**——早期版本正是这些做法把宿主内存拖爆的。
 
+## 开关长什么样（美术风格）
+
+面板里的开关是本插件自己画的（只 `require('react')`，拿不到内置控件），但**度量与配色
+一律对齐内置开关**（`ui-primitives` 的 `Switch.module.css`）：
+
+| 项 | 值 |
+| --- | --- |
+| 轨道 | 36×20，`padding: 2px`，`border-radius: 999px` |
+| 滑块 | 16×16 正圆，打开时 `translateX(16px)` |
+| 关→开 底色 | `--dsw-alias-border-l3` → `--dsw-alias-brand-primary` |
+| 滑块色 | 关：`--dsw-alias-switch-thumb`；开：`--dsw-alias-label-primary-foreground` |
+| 焦点环 | `--dsw-focus-ring-width` + `--dsw-focus-ring-color`（回落到 `--dsw-alias-state-business-primary`） |
+
+两处容易漏掉、漏掉就"看起来不是一套东西"的细节：
+
+1. 开关本体必须是 `<button>` 才能键盘切换，所以 `appearance / margin / padding / border /
+   box-sizing` 都要显式清掉，否则浏览器会给它自己的描边与内边距。
+2. 应用会给控件做全局**超椭圆圆角**，内置开关用 `corner-shape: round` 明确退出。手写的
+   轨道与滑块也必须写这一条，否则胶囊和圆点的形状与内置开关不一致。
+
+`test/client.test.js` 里有一条用例把上表的数字逐条钉住，改样式改歪了会当场失败。
+
 ## 花费预警：怎么算、怎么拦、怎么放行
 
 | 环节 | 做法 |
@@ -136,7 +158,7 @@
 
 ## 验证
 
-- `npm test` —— 判定表 + 档位落地 + 花费折子（含价目、时段、重复计费）+ 插件契约 + 浏览器半边（80 条）
+- `npm test` —— 判定表 + 档位落地 + 花费折子（含价目、时段、重复计费）+ 插件契约 + 浏览器半边（82 条）
 - `npm run verify` —— 客户端 bundle 纯度闸门（一旦违反，整个页面打不开）
 
 ## 已知边界
