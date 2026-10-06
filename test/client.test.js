@@ -341,7 +341,7 @@ async function mountPanel(options = {}) {
    */
   function renderPanel() {
     runtime.enter('panel')
-    state.tree = registry[0]({})
+    state.tree = registry[0]({ sessionId: options.sessionId ?? 'session-1' })
   }
   /** 只画弹窗（它多一个 `useProjection`）。 */
   function renderGuard() {
@@ -772,4 +772,87 @@ test('开关：度量与内置控件逐条对齐（这是"美术风格错位"的
   assert.equal(value(thumb, 'corner-shape'), 'round', '滑块必须是正圆')
   assert.equal(value(on, 'transform'), 'translateX(16px)', '打开时的位移要和内置一致')
   assert.equal(value(on, 'background'), 'var(--dsw-alias-label-primary-foreground)', '打开时滑块用前景色，和内置一致')
+})
+
+test('面板：预值框显示本会话的值，关面板时自动保存（不用按 Enter）', async () => {
+  // 钉两件事：
+  // 1. 回读预值必须带 sessionId——预值是按会话独立的，不带就永远读回 0；
+  // 2. 关闭面板会卸载输入框，浏览器**不会**补发 blur，所以关闭本身必须先把
+  //    没提交的数字写回去（这就是"输入之后退出就变回 0"的原因）。
+  const reads = []
+  const writes = []
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    fetch: async (url, init) => {
+      const text = String(url)
+      if (init?.method === 'POST') {
+        writes.push(JSON.parse(String(init.body)))
+        return { ok: true, json: async () => ({ costLimit: 0.0001, costGuard: true }) }
+      }
+      reads.push(text)
+      // 真实端点：`?switches=1` 给登记表，带 sessionId 的那次给本会话的状态。
+      if (text.includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [{
+              id: 'costGuard',
+              label: { zh: '花费预警' },
+              hint: { zh: 'h' },
+              endpoint: '/dsh-optimizer',
+              field: 'costGuard',
+              input: { field: 'costLimit', unit: { zh: '元' }, placeholder: { zh: '预值' } },
+            }],
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ enabled: true, costGuard: true, costLimit: 0.0001 }) }
+    },
+  })
+  await flush()
+  state.tree.children[0].props.onClick()
+  await flush()
+
+  assert.ok(reads.some((url) => url.includes('sessionId=sess-9')), '回读必须带会话 id')
+  const box = () => findNodes(state.tree, 'data-dsh-opt-amount-input')[0]
+  assert.equal(box().props.value, '0.0001', '输入框要显示本会话当前的预值')
+
+  // 边打字边不提交：只记成"待提交"
+  box().props.onChange({ target: { value: '0.0002' } })
+  await flush()
+  assert.equal(writes.length, 0, '打字过程中不该每个键都写一次')
+
+  // 直接关面板（等价于点面板外面）：必须先把待提交的数字写回去
+  state.tree.children[0].props.onClick()
+  await flush()
+  assert.deepEqual(writes, [{ costLimit: 0.0002, sessionId: 'sess-9' }], '关面板要带上会话把预值存下来')
+})
+
+test('面板：回读不许覆盖用户正在编辑的那一格', async () => {
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    fetch: async (url, init) => {
+      if (init?.method === 'POST') return { ok: true, json: async () => ({ costLimit: 0.0003 }) }
+      if (String(url).includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [{
+              id: 'costGuard', label: { zh: '花费预警' }, hint: { zh: 'h' },
+              endpoint: '/dsh-optimizer', field: 'costGuard',
+              input: { field: 'costLimit', unit: { zh: '元' }, placeholder: { zh: '预值' } },
+            }],
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ enabled: true, costGuard: true, costLimit: 0.0001 }) }
+    },
+  })
+  await flush()
+  state.tree.children[0].props.onClick()
+  await flush()
+  const box = () => findNodes(state.tree, 'data-dsh-opt-amount-input')[0]
+  box().props.onChange({ target: { value: '0.0007' } })
+  await flush()   // 中途重画（比如别的开关触发了回读）
+  assert.equal(box().props.value, '0.0007', '用户手里的文本不许被回读盖掉')
 })
