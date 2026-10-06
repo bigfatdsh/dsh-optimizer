@@ -948,3 +948,36 @@ test('面板：头部只有标题，没有 ✕（收起靠点图标 / Esc / 点�
   assert.equal(head.children.length, 1, '头部只剩标题一项')
   assert.equal(JSON.stringify(head.children[0]), '{"type":"span","props":{},"children":["优化"]}')
 })
+
+test('弹窗：按终止之后必须停在"最初的提示词"那一屏（不许自己消失）', async () => {
+  // 用户实测的 bug：按终止后弹窗直接没了，看不到最初的提示词。
+  // 原因：批次 key 里带了 tripped，终止后 tripped 变 false → 批次变 → 重置块把 ended 清成 null。
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    projection: trippedView(),
+    fetch: async (url, init) => {
+      if (init?.method === 'POST') {
+        return { ok: true, json: async () => ({ guardAction: 'terminate', terminated: true, prompt: '重写鉴权模块' }) }
+      }
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+  await flush()
+  await guardNode(state.guard, 'data-dsh-guard-danger').props.onClick()
+  await flush()
+  assert.ok(state.guard !== null, '终止之后弹窗要留在页面上')
+  assert.match(JSON.stringify(state.guard), /重写鉴权模块/, '要显示本会话最初的提示词')
+
+  // 宿主那边把记录标成 terminated（tripped 变 false）→ 界面**不许**因此把这一屏清掉
+  state.projection = { ...trippedView(), guard: 'terminated' }
+  await flush()
+  assert.ok(state.guard !== null, '宿主状态变化不许把"最初的提示词"那一屏弄没')
+  assert.match(JSON.stringify(state.guard), /重写鉴权模块/)
+
+  // 用户点一下确认才收起
+  const close = findNodes(state.guard, 'data-dsh-guard-primary').find((b) => b.children.includes('关闭这个窗口'))
+  assert.ok(close !== undefined, '要有确认按钮')
+  close.props.onClick()
+  await flush()
+  assert.equal(state.guard, null, '用户确认之后才收起')
+})
