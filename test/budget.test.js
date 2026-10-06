@@ -11,15 +11,16 @@ import test from 'node:test'
 import {
   CostLedger,
   OFFICIAL_PRICING,
-  attemptMicros,
+  attemptNanos,
   foldCost,
+  formatYuan,
   isPeakAt,
   messageRoute,
   normalizeSample,
   overBudget,
   resolvePrice,
   streamSample,
-  toMicros,
+  toNanos,
   zeroSpend,
 } from '../lib/budget.js'
 
@@ -66,11 +67,13 @@ test('价目：按子串匹配、长的键优先、认不出的模型不猜价',
   assert.equal(Object.keys(OFFICIAL_PRICING).length, 4, '价目表就是这四条，改名要同步改注释')
 })
 
-test('换算：微元 = token × 单价，缓存写入按未命中计费', () => {
+test('换算：纳元 = token × 单价 × 1000，缓存写入按未命中计费', () => {
   const price = resolvePrice('deepseek-flash', false)
-  // 1000 未命中 + 200 缓存写（也算未命中）：1200 × 1 = 1200 微元
-  // 5000 命中：5000 × 0.02 = 100 微元；500 输出：500 × 4 = 2000 微元
-  assert.equal(attemptMicros({ uncachedInputTokens: 1000, cacheReadTokens: 5000, cacheWriteTokens: 200, outputTokens: 500 }, price), 3300)
+  // 1000 未命中 + 200 缓存写（也算未命中）：1200 × 1 元/百万 = 1,200,000 纳元
+  // 5000 命中：5000 × 0.02 = 100,000 纳元；500 输出：500 × 4 = 4,000,000 纳元
+  assert.equal(attemptNanos({ uncachedInputTokens: 1000, cacheReadTokens: 5000, cacheWriteTokens: 200, outputTokens: 500 }, price), 3_300_000)
+  // 最便宜的一笔：1 个命中缓存的 token（0.02 元/百万）也要能表示出来
+  assert.equal(attemptNanos({ uncachedInputTokens: 0, cacheReadTokens: 1, cacheWriteTokens: 0, outputTokens: 0 }, price), 20)
 })
 
 test('用量归一：字段非法或为负就不算这一笔，绝不猜', () => {
@@ -111,7 +114,7 @@ test('路由：provider 与 model 缺一不算有路由', () => {
 test('折叠：一次请求计一次，同事件重复到达不再计', () => {
   const usage = { inputTokens: 1000, outputTokens: 500 }
   const first = foldCost(fresh(), messageEvent({ usage }))
-  assert.ok(first.micros > 0, '有路由有用量就该计费')
+  assert.ok(first.nanos > 0, '有路由有用量就该计费')
   assert.equal(first.unpricedTokens, 0)
   assert.deepEqual(first.route, { provider: 'deepseek-account', model: 'deepseek-flash' })
 
@@ -133,18 +136,18 @@ test('折叠：attempt 与 message 是同一次请求，但真重试要各算一
   const retried = foldCost(settled, { type: 'llm/retry-started', time: PEAK, data: { turn: 1, step: 1 } })
   assert.equal(retried.last, undefined)
   const recounted = foldCost(retried, messageEvent({ usage }))
-  assert.equal(recounted.micros, settled.micros * 2, '重试是第二次真实请求，要累加')
+  assert.equal(recounted.nanos, settled.nanos * 2, '重试是第二次真实请求，要累加')
 })
 
 test('折叠：认不出的模型计成未计价 token，金额不动', () => {
   const state = foldCost(fresh(), messageEvent({ usage: { inputTokens: 1000, outputTokens: 500 }, model: 'mystery-1' }))
-  assert.equal(state.micros, 0, '不猜价')
+  assert.equal(state.nanos, 0, '不猜价')
   assert.equal(state.unpricedTokens, 1500, '但要如实记下有多少 token 没算钱')
 })
 
 test('折叠：没有 usage 的事件只更新路由，不动金额', () => {
   const state = foldCost(fresh(), messageEvent({ usage: undefined }))
-  assert.equal(state.micros, 0)
+  assert.equal(state.nanos, 0)
   assert.deepEqual(state.route, { provider: 'deepseek-account', model: 'deepseek-flash' }, '路由仍要记住，下一次没有路由时回落到它')
 })
 
@@ -154,7 +157,7 @@ test('折叠：turn/end 之后同一格可以重新计（跨轮的同一 step �
   const ended = foldCost(first, { type: 'turn/end', time: PEAK, data: { turn: 1, reason: 'completed' } })
   assert.equal(ended.last, undefined)
   const second = foldCost(ended, messageEvent({ turn: 2, step: 1, usage }))
-  assert.equal(second.micros, first.micros * 2)
+  assert.equal(second.nanos, first.nanos * 2)
 })
 
 test('折子：按会话分别记账，淘汰最旧的，drop 掉就没了', () => {
@@ -165,11 +168,11 @@ test('折子：按会话分别记账，淘汰最旧的，drop 掉就没了', () 
   const usage = { inputTokens: 100, outputTokens: 100 }
   ledger.record(a, messageEvent({ usage }))
   ledger.record(b, messageEvent({ usage }))
-  assert.equal(ledger.peek(a).micros > 0, true)
+  assert.equal(ledger.peek(a).nanos > 0, true)
   ledger.record(c, messageEvent({ usage }))
   assert.equal(ledger.records.size, 2, '上限是硬的')
   assert.equal(ledger.peek(a), undefined, '最旧的被淘汰')
-  assert.equal(ledger.peek(c).micros > 0, true)
+  assert.equal(ledger.peek(c).nanos > 0, true)
 
   ledger.drop(c)
   assert.equal(ledger.peek(c), undefined)
@@ -184,22 +187,49 @@ test('折子：只看一眼不会建档（没花过钱的会话不该占位置�
 })
 
 test('判定：没开开关 / 没填预值 / 还没到，都不拦', () => {
-  const spend = { micros: 5_000_000, unpricedTokens: 0 }
-  assert.equal(overBudget(spend, 5_000_000, false), false, '开关关着')
+  const spend = { nanos: 5_000_000_000, unpricedTokens: 0 }
+  assert.equal(overBudget(spend, 5_000_000_000, false), false, '开关关着')
   assert.equal(overBudget(spend, 0, true), false, '预值 0 = 不限')
-  assert.equal(overBudget({ micros: 4_999_999 }, 5_000_000, true), false, '还差一点')
-  assert.equal(overBudget(spend, 5_000_000, true), true, '刚好到也拦')
-  assert.equal(overBudget({ micros: 6_000_000 }, 5_000_000, true), true)
+  assert.equal(overBudget({ nanos: 4_999_999_999 }, 5_000_000_000, true), false, '还差一点')
+  assert.equal(overBudget(spend, 5_000_000_000, true), true, '刚好到也拦')
+  assert.equal(overBudget({ nanos: 6_000_000_000 }, 5_000_000_000, true), true)
 })
 
-test('换算：元 → 微元，非法输入不许变成"随便一个数"', () => {
-  assert.equal(toMicros(5), 5_000_000)
-  assert.equal(toMicros('0.01'), 10_000)
-  assert.equal(toMicros(' 2.5 '), 2_500_000)
-  assert.equal(toMicros(0), 0)
-  assert.equal(toMicros(''), 0, '空串当 0 = 不限')
-  assert.equal(toMicros(-1), undefined)
-  assert.equal(toMicros('abc'), undefined)
-  assert.equal(toMicros(Number.NaN), undefined)
-  assert.equal(toMicros(1e12), undefined, '大到不安全整数就拒绝')
+test('判定：小预值也要真的生效（曾经被微元的精度吃掉）', () => {
+  // 用户填 0.0001 元 = 100000 纳元；一笔典型请求约 600 万纳元，必须拦得住。
+  const limit = toNanos('0.0001')
+  assert.equal(limit, 100_000)
+  assert.equal(overBudget({ nanos: 6_000_000 }, limit, true), true)
+  // 更小的：0.0000005 元 = 500 纳元，仍要是个有效的预值（微元下会被舍成 0 或 1）
+  assert.equal(toNanos('0.0000005'), 500)
+  assert.equal(overBudget({ nanos: 600 }, 500, true), true)
+  // 最便宜的一笔（1 个命中 token = 20 纳元）也要能被判到
+  assert.equal(overBudget({ nanos: 20 }, toNanos('0.00000002'), true), true)
+})
+
+test('换算：元 → 纳元，十进制解析不给浮点留缝隙', () => {
+  assert.equal(toNanos(5), 5_000_000_000)
+  assert.equal(toNanos('0.01'), 10_000_000)
+  assert.equal(toNanos(' 2.5 '), 2_500_000_000)
+  assert.equal(toNanos(0), 0)
+  assert.equal(toNanos(''), undefined, '空串是"没填"，不是 0：交给调用方决定')
+  assert.equal(toNanos('0.0001'), 100_000, '这条曾经被浮点乘法算成 99999.999… 再被舍成 0')
+  assert.equal(toNanos('.5'), 500_000_000)
+  assert.equal(toNanos('5.'), 5_000_000_000)
+  assert.equal(toNanos('0.000000001'), 1, '最小一格就是 1 纳元')
+  assert.equal(toNanos('0.0000000001'), undefined, '比纳元更细的位数直接拒绝，不静默截断')
+  assert.equal(toNanos(-1), undefined)
+  assert.equal(toNanos('abc'), undefined)
+  assert.equal(toNanos('.'), undefined)
+  assert.equal(toNanos(Number.NaN), undefined)
+  assert.equal(toNanos(1e9), undefined, '大到不安全整数就拒绝')
+})
+
+test('展示：纳元 → 元，去掉尾随零但不吃有效位', () => {
+  assert.equal(formatYuan(0), '0.00')
+  assert.equal(formatYuan(0.0001 * 1e9), '0.0001')
+  assert.equal(formatYuan(5_000_000_000), '5.00')
+  assert.equal(formatYuan(6_000_000), '0.006')
+  assert.equal(formatYuan(20), '0.00', '小于 1e-6 元在界面上就是 0.00')
+  assert.equal(formatYuan(undefined), '0.00')
 })
