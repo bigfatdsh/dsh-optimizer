@@ -28,10 +28,24 @@ function fakeHost(options = {}) {
   const logs = []
   const listeners = new Map()
   const services = {}
+  /** 注册过的会话投影定义：花费预警靠它把金额同步给浏览器。 */
+  const projections = []
+  /** 假 agent：只实现插件真的会用到的那几件事。 */
+  const agents = options.agents ?? new Map()
   if (options.projections !== undefined) {
     services.sessionProjections = {
       stateOf: (session) => options.projections(session),
     }
+  }
+  if (options.withCostProjection !== false) {
+    services.sessionProjections = {
+      ...services.sessionProjections,
+      register: (definition) => {
+        projections.push(definition)
+        return () => {}
+      },
+    }
+    services.agents = { get: (id) => agents.get(id) }
   }
   if (options.models !== undefined) {
     const table = new Map(options.models.map((model) => [model.id, model]))
@@ -89,22 +103,29 @@ function fakeHost(options = {}) {
     return chain()
   }
   const route = () => routes.find((entry) => entry.path === ROUTE_PATH)
-  const read = async () => {
-    const out = []
-    await route().handler({ method: 'GET', url: ROUTE_PATH }, { writeHead() {}, end(b) { out.push(JSON.parse(b.toString('utf8'))) } })
-    return out[out.length - 1]
-  }
-  const post = async (body) => {
-    const request = (async function* chunks() {
-      yield Buffer.from(JSON.stringify(body), 'utf8')
+  /** 一次 GET/HEAD；`url` 带查询串时能测 `?guard=1` 这类分支。 */
+  const request = async (method, url, body) => {
+    const incoming = (async function* chunks() {
+      if (body !== undefined) yield Buffer.from(JSON.stringify(body), 'utf8')
     })()
-    request.method = 'POST'
-    request.url = ROUTE_PATH
+    incoming.method = method
+    incoming.url = url
     const out = []
-    await route().handler(request, { writeHead(status) { out.push(status) }, end(payload) { out.push(JSON.parse(payload.toString('utf8'))) } })
+    await route().handler(incoming, { writeHead(status) { out.push(status) }, end(payload) { out.push(JSON.parse(payload.toString('utf8'))) } })
     return out
   }
-  return { ctx, sections, routes, logs, listeners, route, read, post, fire }
+  const read = async (url = ROUTE_PATH) => {
+    const out = await request('GET', url)
+    return out[out.length - 1]
+  }
+  const post = async (body, url = ROUTE_PATH) => request('POST', url, body)
+  /**
+   * 发一条会话事件：`session/event` 的 payload 是 `(session, event)`，不是对象。
+   */
+  const emit = (session, event) => {
+    for (const handler of listeners.get('session/event') ?? []) handler(session, event)
+  }
+  return { ctx, sections, routes, logs, listeners, route, read, post, request, fire, emit, projections, agents }
 }
 
 /** 一条用户消息。 */
@@ -186,9 +207,9 @@ test('开关：GET 报状态与登记表，POST 写入并回报', async () => {
     const handle = apply(host.ctx, { conciseDefault: true, log: false })
     const initial = await host.read()
     assert.equal(initial.enabled, true, 'conciseDefault: true 时首次就是开')
-    // 面板读的是登记表：两个开关，各一个字段，字段名不能重复。
-    assert.deepEqual(initial.switches.map((item) => item.field), ['auto', 'enabled'])
-    assert.deepEqual(initial.switches.map((item) => item.endpoint), [ROUTE_PATH, ROUTE_PATH])
+    // 面板读的是登记表：三个开关，各一个字段，字段名不能重复。
+    assert.deepEqual(initial.switches.map((item) => item.field), ['auto', 'enabled', 'costGuard'])
+    assert.deepEqual(initial.switches.map((item) => item.endpoint), [ROUTE_PATH, ROUTE_PATH, ROUTE_PATH])
     assert.equal(initial.auto, true, 'autoDefault 默认开')
     assert.equal(initial.config.section, SECTION_NAME)
 
@@ -469,4 +490,246 @@ test('auto：盘上的开关在**构造时**就位，第一个请求不会被默
   } finally {
     await rm(home, { recursive: true, force: true })
   }
+})
+
+// --- 花费预警 ---------------------------------------------------------------
+
+/**
+ * 一条用得起费的 `assistant/message`：默认 1000 未命中 + 500 输出。
+ *
+ * 2026-01-05 是周一、11:00 北京（高峰），flash 的价目是 miss 2 / out 8 元每百万，
+ * 所以这一笔正好 6000 微元 = 0.006 元。
+ */
+function usageEvent({ turn = 1, step = 1, model = 'deepseek-flash', inputTokens = 1000, outputTokens = 500, time = Date.UTC(2026, 0, 5, 3, 0, 0) } = {}) {
+  return {
+    type: 'assistant/message',
+    time,
+    data: {
+      turn,
+      step,
+      usage: { inputTokens, outputTokens },
+      message: { id: `m-${turn}-${step}`, source: { kind: 'model', provider: 'deepseek-account', model } },
+    },
+  }
+}
+
+/** 一个假 agent：只记下"被取消了"和"被喂了什么"。 */
+function fakeAgent(id) {
+  return {
+    id,
+    status: 'running',
+    session: { id },
+    cancels: [],
+    followups: [],
+    cancel(cause, options) {
+      this.status = 'idle'
+      this.cancels.push({ cause, options })
+    },
+    followup(message) {
+      this.followups.push(message)
+    },
+  }
+}
+
+test('花费预警：注册会话投影，把金额与拦截状态同步给浏览器', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    assert.equal(host.projections.length, 1, '必须注册且只注册一个投影')
+    const [unit] = host.projections
+    assert.equal(unit.key, 'optimizerCostGuard', '投影键带插件前缀，不和别人撞')
+    assert.equal(typeof unit.wire.view, 'function')
+    assert.deepEqual(unit.wire.view(unit.init()), {
+      enabled: false,
+      micros: 0,
+      unpricedTokens: 0,
+      limit: 0,
+      guard: 'clear',
+      hits: 0,
+    }, '默认关闭、0 元、没拦过')
+
+    const session = { id: 's-1' }
+    await host.post({ costGuard: true, costLimit: 0.01 })
+    host.emit(session, usageEvent())
+    const view = unit.wire.view(unit.apply(unit.init(), { type: 'assistant/message', session }))
+    assert.equal(view.micros, 6000, '折出来的金额要和弹窗显示的一致')
+    assert.equal(view.limit, 10_000, '预值也下发微元，界面自己换算成元')
+    assert.equal(view.guard, 'clear', '6000 < 10000，还没到')
+    assert.equal(view.enabled, true)
+  })
+})
+
+test('花费预警：到预值就停下这一轮，并只拦一次', async () => {
+  await withTempHome(async () => {
+    const agent = fakeAgent('s-guard')
+    const host = fakeHost({ agents: new Map([['s-guard', agent]]) })
+    apply(host.ctx, { log: false })
+    const session = agent.session
+
+    // 预值 0.005 元 = 5000 微元，一笔 6000 微元就过线
+    await host.post({ costGuard: true, costLimit: 0.005 })
+    host.emit(session, usageEvent())
+    assert.equal(agent.cancels.length, 1, '越线立刻停这一轮')
+    assert.deepEqual(agent.cancels[0].cause, { kind: 'hook', reason: 'optimizer:cost-guard' })
+    assert.equal(agent.cancels[0].options, undefined, '不能带 keepInbox：队列里的活儿也要停')
+
+    // 后续事件不该再喊一次取消（agent 已经是 idle 了）
+    host.emit(session, { type: 'step/end', time: Date.now(), data: { turn: 1, step: 1 } })
+    assert.equal(agent.cancels.length, 1, '同一个会话不重复拦')
+
+    // 被拦下之后，下一步必须被拒——否则下一条消息会偷偷续跑
+    const decision = await host.fire(
+      'agent/pre-step',
+      { agent, messages: [userMessage('继续')], turn: 2, step: 1 },
+      async () => ({ kind: 'enter' }),
+    )
+    assert.deepEqual(decision, { kind: 'reject' })
+  })
+})
+
+test('花费预警：开关关着、预值没填、金额没到，都一律不拦', async () => {
+  await withTempHome(async () => {
+    const cases = [
+      { config: { costGuard: false, costLimit: 0.001 }, why: '开关关着' },
+      { config: { costGuard: true, costLimit: 0 }, why: '预值 0 = 不限' },
+      { config: { costGuard: true, costLimit: 100 }, why: '离预值还远' },
+    ]
+    for (const item of cases) {
+      const agent = fakeAgent('s-off')
+      const host = fakeHost({ agents: new Map([['s-off', agent]]) })
+      apply(host.ctx, { log: false })
+      await host.post(item.config)
+      host.emit(agent.session, usageEvent())
+      assert.equal(agent.cancels.length, 0, `${item.why} 时不该拦`)
+      const decision = await host.fire(
+        'agent/pre-step',
+        { agent, messages: [userMessage('继续')], turn: 2, step: 1 },
+        async () => ({ kind: 'enter' }),
+      )
+      assert.deepEqual(decision, { kind: 'enter' }, `${item.why} 时不该拒绝下一步`)
+    }
+  })
+})
+
+test('花费预警：查询串认会话，认不出就 400（不能把状态记到别的会话头上）', async () => {
+  await withTempHome(async () => {
+    const agent = fakeAgent('s-ask')
+    const host = fakeHost({ agents: new Map([['s-ask', agent]]) })
+    apply(host.ctx, { log: false })
+    await host.post({ costGuard: true, costLimit: 0.005 })
+    host.emit(agent.session, usageEvent())
+    await host.fire('agent/pre-step', { agent, messages: [userMessage('把插件写完')], turn: 1, step: 1 }, async () => ({ kind: 'enter' }))
+
+    const [status, body] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=s-ask`)
+    assert.equal(status, 200)
+    assert.equal(body.guard.guard, 'tripped')
+    assert.equal(body.guard.micros, 6000)
+    assert.equal(body.prompt, '把插件写完', '弹窗要能显示本会话最初的提示词')
+
+    // 认不出的会话 id：明确报错，别回一份空状态让界面以为"没在拦"
+    const [badStatus, badBody] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=nope`)
+    assert.equal(badStatus, 200, '读状态本身是成功的')
+    assert.equal(badBody.guard, undefined, '但不会编一个会话出来')
+  })
+})
+
+test('花费预警：验证通过 → 唤醒（推理等级一个字都不动）；终止 → 下清理指令并永久停手', async () => {
+  await withTempHome(async () => {
+    const agent = fakeAgent('s-cmd')
+    const host = fakeHost({ agents: new Map([['s-cmd', agent]]) })
+    apply(host.ctx, { log: false })
+    await host.post({ costGuard: true, costLimit: 0.005 })
+    host.emit(agent.session, usageEvent())
+    await host.fire('agent/pre-step', { agent, messages: [userMessage('重写鉴权模块')], turn: 1, step: 1 }, async () => ({ kind: 'enter' }))
+
+    const [status, body] = await host.post({ guardAction: 'continue', sessionId: 's-cmd' })
+    assert.equal(status, 200)
+    assert.equal(body.delivered, true)
+    assert.equal(agent.followups.length, 1, '要继续就得给模型一条消息')
+    const followup = agent.followups[0]
+    assert.equal(followup.role, 'user')
+    assert.equal(followup.source.kind, 'optimizer')
+    assert.match(followup.content[0].text, /继续这个会话原来那件事/)
+    assert.equal(typeof followup.id, 'string')
+    assert.equal(followup.reasoningEffort, undefined, '推理等级由会话自己保持，插件不许改')
+
+    // 终止：下清理指令，并且之后不再拦（已经结束了）
+    const [endStatus, endBody] = await host.post({ guardAction: 'terminate', sessionId: 's-cmd' })
+    assert.equal(endStatus, 200)
+    assert.equal(endBody.delivered, true)
+    assert.equal(endBody.prompt, '重写鉴权模块', '终止那一屏要回显最初的提示词')
+    assert.match(agent.followups[1].content[0].text, /删除本会话为这次任务产出的东西/)
+    assert.match(agent.followups[1].content[0].text, /拿不准某个文件是不是本次产出的，就不要删/)
+
+    const [, after] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=s-cmd`)
+    assert.equal(after.guard.guard, 'terminated')
+    const decision = await host.fire(
+      'agent/pre-step',
+      { agent, messages: [userMessage('再改一处')], turn: 2, step: 1 },
+      async () => ({ kind: 'enter' }),
+    )
+    assert.deepEqual(decision, { kind: 'enter' }, '终止之后不再阻止用户自己发起的新一轮')
+  })
+})
+
+test('花费预警：没有活着的 agent 时不能假装成功', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    const session = { id: 's-gone' }
+    await host.post({ costGuard: true, costLimit: 0.005 })
+    host.emit(session, usageEvent())
+    // 会话只在我们自己的记录里（agents 里没有），所以只发一条"继续"是发不出去的
+    const [status, body] = await host.post({ guardAction: 'continue', sessionId: 's-gone' })
+    assert.equal(status, 200)
+    assert.equal(body.delivered, false)
+    assert.equal(body.why, 'no-agent')
+  })
+})
+
+test('花费预警：把预值改大就自己松开，不用额外的"取消拦截"接口', async () => {
+  await withTempHome(async () => {
+    const agent = fakeAgent('s-raise')
+    const host = fakeHost({ agents: new Map([['s-raise', agent]]) })
+    apply(host.ctx, { log: false })
+    await host.post({ costGuard: true, costLimit: 0.005 })
+    host.emit(agent.session, usageEvent())
+    assert.equal(agent.cancels.length, 1)
+
+    const [, body] = await host.post({ costLimit: 10 })
+    assert.equal(body.costLimit, 10)
+    const decision = await host.fire(
+      'agent/pre-step',
+      { agent, messages: [userMessage('继续做')], turn: 2, step: 1 },
+      async () => ({ kind: 'enter' }),
+    )
+    assert.deepEqual(decision, { kind: 'enter' }, '预值改大后就不该再拒')
+  })
+})
+
+test('花费预警：预值非法直接 400，不当成 0 悄悄放行', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    const [status, body] = await host.post({ costLimit: 'abc' })
+    assert.equal(status, 400)
+    assert.equal(body.error, 'invalid-limit')
+    const [status2] = await host.post({ guardAction: 'nonsense', sessionId: 's-1' })
+    assert.equal(status2, 400, '不认识的答复要被拒绝')
+    const [status3] = await host.post({ guardAction: 'continue' })
+    assert.equal(status3, 400, '没说是哪个会话就不答复')
+    assert.equal((await host.read()).costLimit, 0, '失败的写入不能偷偷改到盘上的值')
+  })
+})
+
+test('花费预警：开关与预值写进同一个状态文件，和另两个开关互不覆盖', async () => {
+  await withTempHome(async (home) => {
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    await host.post({ costGuard: true, costLimit: 1.5 })
+    await host.post({ enabled: true })
+    await host.post({ auto: false })
+    const saved = JSON.parse(await readFile(join(home, 'optimizer.json'), 'utf8'))
+    assert.deepEqual(saved, { costGuard: true, costLimit: 1_500_000, concise: true, auto: false })
+  })
 })
