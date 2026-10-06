@@ -1,9 +1,9 @@
 {
   "name": "dsh-optimizer",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
-  "description": "优化插件集：把省 token 的开关收在输入栏右侧的「优化」面板里。含「推理等级 auto」（每个请求按轻重自动选该模型真实支持的推理档位，手选优先、判不出就透传）与「精简化输出」（系统提示词最后追加一段输出纪律，任务内容一字不改）。",
+  "description": "优化插件集：把省 token 的开关收在输入栏右侧的「优化」面板里。含「推理等级 auto」（每个请求按轻重自动选该模型真实支持的推理档位，手选优先、判不出就透传）、「精简化输出」（系统提示词最后追加一段输出纪律，任务内容一字不改）与「花费预警」（本会话花费到预值就停住这一轮，弹窗要先验证六位数字才放行；选终止则让模型删掉本会话产出的内容）。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -12,7 +12,11 @@
     "reasoning-effort",
     "thinking",
     "auto",
-    "token"
+    "token",
+    "cost",
+    "budget",
+    "cost-guard",
+    "guard"
   ],
   "license": "MIT",
   "main": "lib/index.js",
@@ -25,6 +29,7 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
+    "lib/budget.js",
     "lib/classify.js",
     "lib/efforts.js",
     "lib/schema.js",
@@ -35,7 +40,7 @@
   ],
   "meta": {
     "title": "优化插件集",
-    "description": "推理等级 auto + 精简化输出，一个面板两个开关；所有失败方向都是\"原样工作\"，不会让请求失败。"
+    "description": "推理等级 auto + 精简化输出 + 花费预警，一个面板三个开关；所有失败方向都是\"原样工作\"，不会让请求失败。"
   },
   "dsh": {
     "bundle": {
@@ -49,7 +54,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/classify.test.js test/efforts.test.js test/plugin.test.js test/client.test.js",
+    "test": "node --test test/classify.test.js test/efforts.test.js test/budget.test.js test/plugin.test.js test/client.test.js",
     "verify": "node tools/verify-client-bundle.mjs"
   }
 }
