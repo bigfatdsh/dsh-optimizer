@@ -498,7 +498,7 @@ test('auto：盘上的开关在**构造时**就位，第一个请求不会被默
  * 一条用得起费的 `assistant/message`：默认 1000 未命中 + 500 输出。
  *
  * 2026-01-05 是周一、11:00 北京（高峰），flash 的价目是 miss 2 / out 8 元每百万，
- * 所以这一笔正好 6000 微元 = 0.006 元。
+ * 所以这一笔正好 6,000,000 纳元 = 0.006 元。
  */
 function usageEvent({ turn = 1, step = 1, model = 'deepseek-flash', inputTokens = 1000, outputTokens = 500, time = Date.UTC(2026, 0, 5, 3, 0, 0) } = {}) {
   return {
@@ -541,7 +541,7 @@ test('花费预警：注册会话投影，把金额与拦截状态同步给浏�
     assert.equal(typeof unit.wire.view, 'function')
     assert.deepEqual(unit.wire.view(unit.init()), {
       enabled: false,
-      micros: 0,
+      nanos: 0,
       unpricedTokens: 0,
       limit: 0,
       guard: 'clear',
@@ -552,8 +552,8 @@ test('花费预警：注册会话投影，把金额与拦截状态同步给浏�
     await host.post({ costGuard: true, costLimit: 0.01 })
     host.emit(session, usageEvent())
     const view = unit.wire.view(unit.apply(unit.init(), { type: 'assistant/message', session }))
-    assert.equal(view.micros, 6000, '折出来的金额要和弹窗显示的一致')
-    assert.equal(view.limit, 10_000, '预值也下发微元，界面自己换算成元')
+    assert.equal(view.nanos, 6_000_000, '折出来的金额要和弹窗显示的一致')
+    assert.equal(view.limit, 10_000_000, '预值也下发纳元，界面自己换算成元')
     assert.equal(view.guard, 'clear', '6000 < 10000，还没到')
     assert.equal(view.enabled, true)
   })
@@ -590,7 +590,9 @@ test('花费预警：到预值就停下这一轮，并只拦一次', async () =>
 test('花费预警：开关关着、预值没填、金额没到，都一律不拦', async () => {
   await withTempHome(async () => {
     const cases = [
-      { config: { costGuard: false, costLimit: 0.001 }, why: '开关关着' },
+      // 注意：这里**不能**拿"填个正数预值"来表达"开关关着"——填正数会自动打开开关
+      // （见下一条用例），那条路径本身就是要拦的。
+      { config: { costGuard: false }, why: '开关关着' },
       { config: { costGuard: true, costLimit: 0 }, why: '预值 0 = 不限' },
       { config: { costGuard: true, costLimit: 100 }, why: '离预值还远' },
     ]
@@ -611,6 +613,28 @@ test('花费预警：开关关着、预值没填、金额没到，都一律不�
   })
 })
 
+test('花费预警：填一个正数预值会自动打开开关（填 0 不会）', async () => {
+  await withTempHome(async (home) => {
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    assert.equal((await host.read()).costGuard, false, '默认关着')
+
+    const [, set] = await host.post({ costLimit: 0.0001 })
+    assert.equal(set.costGuard, true, '填正数＝你就是想让它拦，开关要跟着开')
+    assert.equal(set.costLimit, 0.0001, '界面拿回的是元，不是纳元')
+    assert.deepEqual(JSON.parse(await readFile(join(home, 'optimizer.json'), 'utf8')), { costLimitNanos: 100_000, costGuard: true })
+
+    // 填 0 表达的是"别拦"：不许把开关又点开
+    const [offStatus, off] = await host.post({ costGuard: false, costLimit: 0 })
+    assert.equal(offStatus, 200)
+    assert.equal(off.costGuard, false)
+    assert.equal(off.costLimit, 0)
+    const [againStatus, again] = await host.post({ costLimit: 0 })
+    assert.equal(againStatus, 200)
+    assert.equal(again.costGuard, false, '填 0 不该顺手把开关打开')
+  })
+})
+
 test('花费预警：查询串认会话，认不出就 400（不能把状态记到别的会话头上）', async () => {
   await withTempHome(async () => {
     const agent = fakeAgent('s-ask')
@@ -623,7 +647,7 @@ test('花费预警：查询串认会话，认不出就 400（不能把状态记�
     const [status, body] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=s-ask`)
     assert.equal(status, 200)
     assert.equal(body.guard.guard, 'tripped')
-    assert.equal(body.guard.micros, 6000)
+    assert.equal(body.guard.nanos, 6_000_000)
     assert.equal(body.prompt, '把插件写完', '弹窗要能显示本会话最初的提示词')
 
     // 认不出的会话 id：明确报错，别回一份空状态让界面以为"没在拦"
@@ -735,6 +759,6 @@ test('花费预警：开关与预值写进同一个状态文件，和另两个�
     await host.post({ enabled: true })
     await host.post({ auto: false })
     const saved = JSON.parse(await readFile(join(home, 'optimizer.json'), 'utf8'))
-    assert.deepEqual(saved, { costGuard: true, costLimit: 1_500_000, concise: true, auto: false })
+    assert.deepEqual(saved, { costGuard: true, costLimitNanos: 1_500_000_000, concise: true, auto: false })
   })
 })
