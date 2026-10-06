@@ -877,3 +877,46 @@ test('花费预警：子代理/无 agent 的会话也要能填预值并真的拦
     assert.equal((await host.read(host.withSession('sub-1'))).costLimit, 0.0001)
   })
 })
+
+test('花费预警：三个出口都要真的走得通（继续＝放行一步，之后重新拦；调宽＝松开；终止＝停手）', async () => {
+  await withTempHome(async () => {
+    const agent = fakeAgent('s-exit')
+    const host = fakeHost({ agents: new Map([['s-exit', agent]]) })
+    apply(host.ctx, { log: false })
+    const spend = (nanos) => host.emit(agent.session, usageEvent({ inputTokens: Math.round(nanos / 2000), outputTokens: 0 }))
+    const next = () => host.fire(
+      'agent/pre-step',
+      { agent, messages: [userMessage('继续')], turn: 1, step: 1 },
+      async () => ({ kind: 'enter' }),
+    )
+
+    await host.post({ costLimit: 0.0001 }, host.withSession('s-exit'))
+    host.emit(agent.session, usageEvent({ inputTokens: 60, outputTokens: 0 }))   // 0.00012 元 > 0.0001
+    assert.deepEqual(await next(), { kind: 'reject' }, '先被拦')
+
+    // 出口一：填验证码继续 —— 这一步必须真的放行（曾经验证完又被拒回去，看着像"点了没反应"）
+    const [, woke] = await host.post({ guardAction: 'continue', sessionId: 's-exit' })
+    assert.equal(woke.delivered, true)
+    assert.deepEqual(await next(), { kind: 'enter' }, '验证通过后这一步要放行（放行只对一步有效）')
+
+    // 再花一笔还是超 → 重新拦（不是"永久解除"）
+    host.emit(agent.session, usageEvent({ inputTokens: 80, outputTokens: 0 }))
+    assert.deepEqual(await next(), { kind: 'reject' }, '又超了就要重新拦')
+
+    // 出口二：把预值调宽 → 立刻松开
+    const current = (await host.read(`${ROUTE_PATH}?guard=1&sessionId=s-exit`)).guard.nanos
+    await host.post({ costLimit: String((current * 2) / 1e9) }, host.withSession('s-exit'))
+    assert.equal((await host.read(`${ROUTE_PATH}?guard=1&sessionId=s-exit`)).guard.guard, 'clear', '宽了就松开')
+    assert.deepEqual(await next(), { kind: 'enter' })
+
+    // 出口三：终止 → 停手，而且之后不再拦这个会话
+    host.emit(agent.session, usageEvent({ inputTokens: 500, outputTokens: 0 }))
+    assert.deepEqual(await next(), { kind: 'reject' }, '又超了')
+    agent.status = 'running'
+    const before = agent.followups.length     // 「继续」已经下发过一条，终止不该再多任何一条
+    const [, ended] = await host.post({ guardAction: 'terminate', sessionId: 's-exit' })
+    assert.equal(ended.terminated, true)
+    assert.equal(agent.followups.length, before, '终止不下发任何消息')
+    assert.deepEqual(await next(), { kind: 'enter' }, '终止之后用户还能继续用这个会话')
+  })
+})
