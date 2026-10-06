@@ -944,3 +944,14 @@ test('bundle：弹窗状态必须有 HTTP 轮询通道（投影是可选加速�
   assert.match(source, /setInterval\(\(\) => void ask\(\), \d+\)/, '要按固定间隔轮询（推送丢了也能兜住）')
   assert.match(source, /data-dsh-guard-alert/, '拿不到状态要在页面上挂可见告警，不能静默')
 })
+
+test('面板：头部只有标题，没有 ✕（收起靠点图标 / Esc / 点面板外面）', async () => {
+  const { flush, state } = await mountPanel()
+  await flush()
+  state.tree.children[0].props.onClick()   // 打开面板
+  await flush()
+  assert.equal(findNodes(state.tree, 'data-dsh-opt-close').length, 0, '优化面板头部不该有 ✕')
+  const head = findNodes(state.tree, 'data-dsh-opt-head')[0]
+  assert.equal(head.children.length, 1, '头部只剩标题一项')
+  assert.equal(JSON.stringify(head.children[0]), '{"type":"span","props":{},"children":["优化"]}')
+})
