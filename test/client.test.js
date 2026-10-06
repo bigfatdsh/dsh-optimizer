@@ -856,3 +856,41 @@ test('面板：回读不许覆盖用户正在编辑的那一格', async () => {
   await flush()   // 中途重画（比如别的开关触发了回读）
   assert.equal(box().props.value, '0.0007', '用户手里的文本不许被回读盖掉')
 })
+
+test('面板：写入被拒要当场说出来，不许静默失败', async () => {
+  // 这条钉的是"查了很久才找到"的那个坑：早期版本把被拒的写入当成功吞掉，
+  // 界面看着填好了、实际宿主根本没存（`unknown-session`），用户只能看到"没生效"。
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    fetch: async (url, init) => {
+      if (String(url).includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [{
+              id: 'costGuard', label: { zh: '花费预警' }, hint: { zh: 'h' },
+              endpoint: '/dsh-optimizer', field: 'costGuard',
+              input: { field: 'costLimit', unit: { zh: '元' }, placeholder: { zh: '预值' } },
+            }],
+          }),
+        }
+      }
+      if (init?.method === 'POST') {
+        // 宿主认不出会话：正是线上真实发生的那个拒绝
+        return { ok: false, status: 400, json: async () => ({ error: 'unknown-session' }) }
+      }
+      return { ok: true, json: async () => ({ enabled: true, costGuard: true, costLimit: 0 }) }
+    },
+  })
+  await flush()
+  state.tree.children[0].props.onClick()
+  await flush()
+  const box = () => findNodes(state.tree, 'data-dsh-opt-amount-input')[0]
+  box().props.onChange({ target: { value: '0.0001' } })
+  box().props.onBlur({ target: { value: '0.0001' } })   // 失焦提交：等价于用户点别处
+  await flush()
+  const fail = findNodes(state.tree, 'data-dsh-opt-fail')
+  assert.equal(fail.length, 1, '被拒必须显示出来')
+  assert.match(JSON.stringify(fail[0]), /没存上/)
+  assert.match(JSON.stringify(fail[0]), /认不出这个会话/)
+})
