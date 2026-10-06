@@ -846,3 +846,34 @@ test('花费预警：同一场会话、不同的 Session 实例，仍算同一�
     assert.equal((await host.read(host.withSession('s-id'))).costLimit, 0.0001, '被拒的写入不该动到已有预值')
   })
 })
+
+test('花费预警：子代理/无 agent 的会话也要能填预值并真的拦（预值只认会话 id）', async () => {
+  await withTempHome(async () => {
+    // agents 里**没有**这场会话：子代理会话、已归档会话、宿主刚重启都是这个样子。
+    const host = fakeHost()
+    apply(host.ctx, { log: false })
+    const subagent = { id: 'sub-1' }
+
+    // 1) 填预值：不该因为"查不到 agent"就被拒
+    const [status, body] = await host.post({ costLimit: 0.0001 }, host.withSession('sub-1'))
+    assert.equal(status, 200, '预值只要会话 id，不需要有活着的 agent')
+    assert.equal(body.costGuard, true, '填正数会打开开关')
+    assert.equal(body.costLimit, 0.0001, '读回本会话的预值')
+
+    // 2) 到预值仍然要拦得住：这一路不依赖 agent
+    host.emit(subagent, usageEvent({ inputTokens: 100, outputTokens: 0 }))
+    const decision = await host.fire(
+      'agent/pre-step',
+      { agent: { session: subagent }, messages: [userMessage('继续')], turn: 1, step: 1 },
+      async () => ({ kind: 'enter' }),
+    )
+    assert.deepEqual(decision, { kind: 'reject' }, '没有 agent 也要按预值拦下下一步')
+
+    // 3) 弹窗读得到金额、预值、最初的提示词
+    const [, view] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=sub-1`)
+    assert.equal(view.guard.guard, 'tripped')
+    assert.equal(view.guard.limit, 100_000, '预值按纳元下发')
+    assert.equal(view.guard.nanos, 200_000, '一笔 0.0002 元')
+    assert.equal((await host.read(host.withSession('sub-1'))).costLimit, 0.0001)
+  })
+})
