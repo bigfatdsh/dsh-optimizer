@@ -714,7 +714,15 @@ test('花费预警：验证通过 → 唤醒；终止 → 只停手并回显最�
       { agent, messages: [userMessage('再改一处')], turn: 2, step: 1 },
       async () => ({ kind: 'enter' }),
     )
-    assert.deepEqual(decision, { kind: 'enter' }, '终止之后不再阻止用户自己发起的新一轮')
+    assert.deepEqual(decision, { kind: 'reject' }, '终止之后不许再跑：否则"终止"等于没终止')
+
+    // 解除口是"把额度调宽"（用户在面板里改预值）：改完就该能继续
+    await host.post({ costLimit: 1 }, host.withSession('s-cmd'))
+    assert.deepEqual(
+      await host.fire('agent/pre-step', { agent, messages: [userMessage('继续')], turn: 3, step: 1 }, async () => ({ kind: 'enter' })),
+      { kind: 'enter' },
+      '调宽额度之后解除停止',
+    )
   })
 })
 
@@ -917,7 +925,11 @@ test('花费预警：三个出口都要真的走得通（继续＝放行一步�
     const [, ended] = await host.post({ guardAction: 'terminate', sessionId: 's-exit' })
     assert.equal(ended.terminated, true)
     assert.equal(agent.followups.length, before, '终止不下发任何消息')
-    assert.deepEqual(await next(), { kind: 'enter' }, '终止之后用户还能继续用这个会话')
+    assert.deepEqual(await next(), { kind: 'reject' }, '终止之后不许再跑')
+
+    // 关掉开关也是解除口（用户明确表示不要这个预警了）
+    await host.post({ costGuard: false })
+    assert.deepEqual(await next(), { kind: 'enter' }, '关掉开关之后解除停止')
   })
 })
 
