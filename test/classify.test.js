@@ -8,9 +8,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { BUCKETS, classifyMessage, classifyText } from '../lib/classify.js'
+import { BUCKETS, classifyMessage, classifyText, scoreText } from '../lib/classify.js'
 
-/** 期望：客套 → 最省；提问 → 轻；要动手 → 标准；大工程/全面审查 → 重。 */
+/**
+ * 期望：客套 → 最省；提问 → 轻；要动手 → 标准；大工程 / 明确要"做到极致" → 重。
+ *
+ * 长度权重从 21 字起算（+2），所以除客套外几乎每条真实请求都至少 +2 —— 这是刻意的：
+ * 那一档的含义是"这不是一句客套"，不是"这句话很长"。
+ */
 const CASES = [
   // 纯客套，且整句很短
   ['你好', 'quiet'],
@@ -39,12 +44,53 @@ const CASES = [
   ['帮我从零搭建一套订单系统的架构设计，要考虑分库分表和缓存策略', 'heavy'],
   ['给我一份全面的代码审查报告，逐项列出安全审计结果和性能瓶颈', 'heavy'],
   ['把整个项目从 webpack 迁移到 vite，包含所有插件的兼容性处理', 'heavy'],
+
+  // 明确要求质量优先 / 要验收 / 有交付后果
+  ['做一份极致的方案，要全面、逐项核对，最后交付给客户', 'heavy'],
+  ['这份方案下周要交付给客户，请逐项核对每个数据', 'heavy'],
 ]
+
+/** 只报分、不报组的用例：钉住权重本身，改权重时先看这里。 */
+const SCORES = [
+  // [文本, 期望分数]
+  ['你好', 0],
+  ['什么是事件循环？', 2],
+  ['生成一个ppt', 2],
+  ['做一份极致的方案', 3],
+  ['我要极致的效果', 3],
+]
+
 
 test('判定表', () => {
   for (const [text, expected] of CASES) {
     const actual = classifyText(text)
     assert.equal(actual, expected, `"${text}" → ${actual}（期望 ${expected}）`)
+  }
+})
+
+test('分数表（钉住权重本身）', () => {
+  for (const [text, expected] of SCORES) {
+    const actual = scoreText(text).total
+    assert.equal(actual, expected, `"${text}" → ${actual} 分（期望 ${expected}）`)
+  }
+})
+
+test('长度权重只取最高一档，不叠乘', () => {
+  // 21 字起 +2；200 字起 +6；800 字起 +10。同内容、只改长度，分数必须只落一档。
+  const short = scoreText('嗯'.repeat(10)).total
+  const mid = scoreText('嗯'.repeat(60)).total
+  const longer = scoreText('嗯'.repeat(300)).total
+  const longest = scoreText('嗯'.repeat(900)).total
+  assert.equal(short, 0, '基准：10 个"嗯"不带任何信号分')
+  assert.equal(mid, 2, '21 字起只加 2（不该把 200 字的 6 分也叠上）')
+  assert.equal(longer, 6, '200 字起只加 6')
+  assert.equal(longest, 10, '800 字起只加 10')
+})
+
+test('极致类修饰词一票给 3 分', () => {
+  for (const text of ['做一份极致的方案', '我要极致的效果', '这个要做得完美一点']) {
+    assert.equal(scoreText(text).total, 3, text)
+    assert.ok(scoreText(text).signals.includes('quality'), text)
   }
 })
 
