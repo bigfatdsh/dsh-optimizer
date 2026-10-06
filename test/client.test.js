@@ -12,8 +12,8 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import test from 'node:test'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -626,7 +626,7 @@ test('弹窗：填对六位数字才放行，填错只报错不发请求', async
   assert.deepEqual(posts[0].body, { guardAction: 'continue', sessionId: 'session-1' })
 })
 
-test('弹窗：终止只发 terminate，然后只把最初的提示词摆出来（没有任何删除指令）', async () => {
+test('弹窗：终止发 terminate，并把最初的提示词与下发的清理指令一起摆出来', async () => {
   const posts = []
   const { flush, state } = await mountPanel({
     sessionId: 'session-9',
@@ -634,7 +634,7 @@ test('弹窗：终止只发 terminate，然后只把最初的提示词摆出来�
     fetch: async (url, init) => {
       if (init?.method === 'POST') {
         posts.push({ url: String(url), body: JSON.parse(String(init.body)) })
-        return { ok: true, json: async () => ({ guardAction: 'terminate', terminated: true, prompt: '给这个插件加个功能' }) }
+        return { ok: true, json: async () => ({ guardAction: 'terminate', terminated: true, prompt: '给这个插件加个功能', delivered: true }) }
       }
       return { ok: true, json: async () => ({}) }
     },
@@ -643,15 +643,12 @@ test('弹窗：终止只发 terminate，然后只把最初的提示词摆出来�
   await flush()
   assert.deepEqual(posts, [{ url: '/dsh-optimizer', body: { guardAction: 'terminate', sessionId: 'session-9' } }])
 
-  // 终止之后那一屏：说清已经停手、没有下删除指令，并把最初的提示词摆出来
   const text = JSON.stringify(state.guard)
   assert.match(text, /给这个插件加个功能/, '必须回显本会话最初的提示词')
-  assert.match(text, /这一轮已经停住/)
-  assert.match(text, /没有.*删除指令/, '要明确告诉用户：插件没让模型删任何东西')
-  assert.doesNotMatch(text, /删除本会话为这次任务产出的东西/, '那套清理指令已经取消了')
-  assert.doesNotMatch(text, /拿不准某个文件是不是本次产出的/, '那套清理指令已经取消了')
+  assert.match(text, /已给本会话的模型下达清理指令/, '要说明指令已经下发')
+  assert.match(text, /删除本会话为这次任务产出的东西/, '要把下发的清理指令原文摆出来')
+  assert.match(text, /用户原有的文件/, '边界要写清楚：用户原有的文件不动')
   assert.doesNotMatch(text, /data-dsh-guard-digit/, '终止后不再要验证码')
-  assert.doesNotMatch(text, /data-dsh-guard-prompt[^]*清理/, '不再展示任何清理指令原文')
 })
 
 test('弹窗：宿主说没能唤醒时如实告诉用户，不要假装成功', async () => {
@@ -988,4 +985,14 @@ test('面板：「自检」要能当场把弹窗画出来（分辨"没生效"和
   await guardNode(guard, 'data-dsh-guard-danger').props.onClick()
   await flush()
   assert.equal(state.guard, null, '预览点一下就该关掉')
+})
+
+test('bundle：弹窗状态必须有 HTTP 轮询通道（投影是可选加速，不是唯一来源）', async () => {
+  // 这一条钉的是一次真实事故：弹窗只看会话投影，投影没送到时弹窗永远不出现，
+  // 用户看到的是"装了跟没装一样"。所以"直接问宿主"这条通道必须是代码里写死的一等公民。
+  const source = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(source, /guard=1&sessionId=/, '要有一处直接问宿主"这个会话被拦了吗"的请求')
+  assert.match(source, /setInterval\(\(\) => void ask\(\), \d+\)/, '要按固定间隔轮询（推送丢了也能兜住）')
+  assert.match(source, /data-dsh-guard-alert/, '拿不到状态要在页面上挂可见告警，不能静默')
+  assert.match(source, /花费预警 v\d+\.\d+\.\d+/, '面板要显示版本号：一眼看出页面拿到的是不是新 bundle')
 })
