@@ -118,14 +118,23 @@ function fakeHost(options = {}) {
     const out = await request('GET', url)
     return out[out.length - 1]
   }
+  /**
+   * 一次 POST。`url` 可以带查询串——预值按会话独立，宿主就是靠 `?sessionId=` 认会话的。
+   *
+   * @param {object} body - 请求体。
+   * @param {string} [url] - 端点（可带查询串）。
+   * @returns {Promise<Array>} `[status, body]`。
+   */
   const post = async (body, url = ROUTE_PATH) => request('POST', url, body)
+  /** 带会话的端点：面板与弹窗发的都是这个形状。 */
+  const withSession = (sessionId) => `${ROUTE_PATH}?sessionId=${encodeURIComponent(sessionId)}`
   /**
    * 发一条会话事件：`session/event` 的 payload 是 `(session, event)`，不是对象。
    */
   const emit = (session, event) => {
     for (const handler of listeners.get('session/event') ?? []) handler(session, event)
   }
-  return { ctx, sections, routes, logs, listeners, route, read, post, request, fire, emit, projections, agents }
+  return { ctx, sections, routes, logs, listeners, route, read, post, request, fire, emit, projections, agents, withSession }
 }
 
 /** 一条用户消息。 */
@@ -549,12 +558,14 @@ test('花费预警：注册会话投影，把金额与拦截状态同步给浏�
     }, '默认关闭、0 元、没拦过')
 
     const session = { id: 's-1' }
-    await host.post({ costGuard: true, costLimit: 0.01 })
+    // 真会话上才认得出来：预值是"这个会话"的，宿主靠 agents 服务把 id 换成会话对象。
+    host.agents.set('s-1', fakeAgent('s-1'))
+    await host.post({ costGuard: true, costLimit: 0.01 }, host.withSession('s-1'))
     host.emit(session, usageEvent())
     const view = unit.wire.view(unit.apply(unit.init(), { type: 'assistant/message', session }))
     assert.equal(view.nanos, 6_000_000, '折出来的金额要和弹窗显示的一致')
     assert.equal(view.limit, 10_000_000, '预值也下发纳元，界面自己换算成元')
-    assert.equal(view.guard, 'clear', '6000 < 10000，还没到')
+    assert.equal(view.guard, 'clear', '0.006 < 0.01，还没到')
     assert.equal(view.enabled, true)
   })
 })
@@ -566,8 +577,8 @@ test('花费预警：到预值就停下这一轮，并只拦一次', async () =>
     apply(host.ctx, { log: false })
     const session = agent.session
 
-    // 预值 0.005 元 = 5000 微元，一笔 6000 微元就过线
-    await host.post({ costGuard: true, costLimit: 0.005 })
+    // 预值 0.005 元 = 5,000,000 纳元，一笔 6,000,000 纳元就过线
+    await host.post({ costGuard: true, costLimit: 0.005 }, host.withSession('s-guard'))
     host.emit(session, usageEvent())
     assert.equal(agent.cancels.length, 1, '越线立刻停这一轮')
     assert.deepEqual(agent.cancels[0].cause, { kind: 'hook', reason: 'optimizer:cost-guard' })
@@ -600,7 +611,7 @@ test('花费预警：开关关着、预值没填、金额没到，都一律不�
       const agent = fakeAgent('s-off')
       const host = fakeHost({ agents: new Map([['s-off', agent]]) })
       apply(host.ctx, { log: false })
-      await host.post(item.config)
+      await host.post(item.config, host.withSession('s-off'))
       host.emit(agent.session, usageEvent())
       assert.equal(agent.cancels.length, 0, `${item.why} 时不该拦`)
       const decision = await host.fire(
@@ -619,19 +630,25 @@ test('花费预警：填一个正数预值会自动打开开关（填 0 不会�
     apply(host.ctx, { log: false })
     assert.equal((await host.read()).costGuard, false, '默认关着')
 
-    const [, set] = await host.post({ costLimit: 0.0001 })
+    const agent = fakeAgent('s-limit')
+    const host2 = fakeHost({ agents: new Map([['s-limit', agent]]) })
+    apply(host2.ctx, { log: false })
+    const [, set] = await host2.post({ costLimit: 0.0001 }, host2.withSession('s-limit'))
     assert.equal(set.costGuard, true, '填正数＝你就是想让它拦，开关要跟着开')
     assert.equal(set.costLimit, 0.0001, '界面拿回的是元，不是纳元')
-    assert.deepEqual(JSON.parse(await readFile(join(home, 'optimizer.json'), 'utf8')), { costLimitNanos: 100_000, costGuard: true })
 
     // 填 0 表达的是"别拦"：不许把开关又点开
-    const [offStatus, off] = await host.post({ costGuard: false, costLimit: 0 })
+    const [offStatus, off] = await host2.post({ costGuard: false, costLimit: 0 }, host2.withSession('s-limit'))
     assert.equal(offStatus, 200)
     assert.equal(off.costGuard, false)
     assert.equal(off.costLimit, 0)
-    const [againStatus, again] = await host.post({ costLimit: 0 })
+    const [againStatus, again] = await host2.post({ costLimit: 0 }, host2.withSession('s-limit'))
     assert.equal(againStatus, 200)
     assert.equal(again.costGuard, false, '填 0 不该顺手把开关打开')
+
+    // 不带会话就拒掉：绝不回退成"写一个全局值"（那会拦到别的会话头上）
+    const [noSession] = await host2.post({ costLimit: 1 })
+    assert.equal(noSession, 400, '不知道写给哪个会话就必须拒绝')
   })
 })
 
@@ -640,7 +657,7 @@ test('花费预警：查询串认会话，认不出就 400（不能把状态记�
     const agent = fakeAgent('s-ask')
     const host = fakeHost({ agents: new Map([['s-ask', agent]]) })
     apply(host.ctx, { log: false })
-    await host.post({ costGuard: true, costLimit: 0.005 })
+    await host.post({ costGuard: true, costLimit: 0.005 }, host.withSession('s-ask'))
     host.emit(agent.session, usageEvent())
     await host.fire('agent/pre-step', { agent, messages: [userMessage('把插件写完')], turn: 1, step: 1 }, async () => ({ kind: 'enter' }))
 
@@ -662,7 +679,7 @@ test('花费预警：验证通过 → 唤醒（推理等级一个字都不动）
     const agent = fakeAgent('s-cmd')
     const host = fakeHost({ agents: new Map([['s-cmd', agent]]) })
     apply(host.ctx, { log: false })
-    await host.post({ costGuard: true, costLimit: 0.005 })
+    await host.post({ costGuard: true, costLimit: 0.005 }, host.withSession('s-cmd'))
     host.emit(agent.session, usageEvent())
     await host.fire('agent/pre-step', { agent, messages: [userMessage('重写鉴权模块')], turn: 1, step: 1 }, async () => ({ kind: 'enter' }))
 
@@ -706,7 +723,7 @@ test('花费预警：没有活着的 agent 时不能假装成功', async () => {
     const host = fakeHost()
     apply(host.ctx, { log: false })
     const session = { id: 's-gone' }
-    await host.post({ costGuard: true, costLimit: 0.005 })
+    await host.post({ costGuard: true, costLimit: 0.005 }, host.withSession('s-gone'))
     host.emit(session, usageEvent())
     // 会话只在我们自己的记录里（agents 里没有），所以只发一条"继续"是发不出去的
     const [status, body] = await host.post({ guardAction: 'continue', sessionId: 's-gone' })
@@ -721,11 +738,11 @@ test('花费预警：把预值改大就自己松开，不用额外的"取消拦�
     const agent = fakeAgent('s-raise')
     const host = fakeHost({ agents: new Map([['s-raise', agent]]) })
     apply(host.ctx, { log: false })
-    await host.post({ costGuard: true, costLimit: 0.005 })
+    await host.post({ costGuard: true, costLimit: 0.005 }, host.withSession('s-raise'))
     host.emit(agent.session, usageEvent())
     assert.equal(agent.cancels.length, 1)
 
-    const [, body] = await host.post({ costLimit: 10 })
+    const [, body] = await host.post({ costLimit: 10 }, host.withSession('s-raise'))
     assert.equal(body.costLimit, 10)
     const decision = await host.fire(
       'agent/pre-step',
@@ -740,7 +757,7 @@ test('花费预警：预值非法直接 400，不当成 0 悄悄放行', async (
   await withTempHome(async () => {
     const host = fakeHost()
     apply(host.ctx, { log: false })
-    const [status, body] = await host.post({ costLimit: 'abc' })
+    const [status, body] = await host.post({ costLimit: 'abc' }, host.withSession('s-1'))
     assert.equal(status, 400)
     assert.equal(body.error, 'invalid-limit')
     const [status2] = await host.post({ guardAction: 'nonsense', sessionId: 's-1' })
@@ -755,10 +772,77 @@ test('花费预警：开关与预值写进同一个状态文件，和另两个�
   await withTempHome(async (home) => {
     const host = fakeHost()
     apply(host.ctx, { log: false })
-    await host.post({ costGuard: true, costLimit: 1.5 })
+    await host.post({ costGuard: true, costLimit: 1.5 }, host.withSession('s-file'))
     await host.post({ enabled: true })
     await host.post({ auto: false })
     const saved = JSON.parse(await readFile(join(home, 'optimizer.json'), 'utf8'))
-    assert.deepEqual(saved, { costGuard: true, costLimitNanos: 1_500_000_000, concise: true, auto: false })
+    assert.deepEqual(saved, { costGuard: true, concise: true, auto: false }, '预值按会话存在内存里，不落盘')
+  })
+})
+
+test('花费预警：预值按会话独立，互不干扰、各自累加', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({
+      agents: new Map([
+        ['sess-A', fakeAgent('sess-A')],
+        ['sess-B', fakeAgent('sess-B')],
+      ]),
+    })
+    apply(host.ctx, { log: false })
+    const A = host.agents.get('sess-A')
+    const B = host.agents.get('sess-B')
+
+    await host.post({ costLimit: 0.0001 }, host.withSession('sess-A'))
+    await host.post({ costLimit: 0.01 }, host.withSession('sess-B'))
+    assert.equal((await host.read(host.withSession('sess-A'))).costLimit, 0.0001)
+    assert.equal((await host.read(host.withSession('sess-B'))).costLimit, 0.01, '两个会话各记各的')
+    assert.equal((await host.read()).costLimit, 0, '不带会话就没有预值可谈')
+
+    // A 花 0.00002：离它自己的预值还差得远
+    host.emit(A.session, usageEvent({ inputTokens: 10, outputTokens: 0 }))
+    assert.equal(A.cancels.length, 0)
+    // B 同样花 0.00002：对 B 的 0.01 来说更不算什么
+    host.emit(B.session, usageEvent({ inputTokens: 10, outputTokens: 0 }))
+    assert.equal(B.cancels.length, 0, 'B 不该被 A 的小额度影响')
+
+    // A 再花一笔，累计越过它自己的 0.0001 → 只拦 A
+    host.emit(A.session, usageEvent({ inputTokens: 50, outputTokens: 0 }))
+    assert.equal(A.cancels.length, 1, 'A 到了自己的预值')
+    assert.equal(B.cancels.length, 0, 'B 一点都不该动')
+
+    const [, viewA] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=sess-A`)
+    const [, viewB] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=sess-B`)
+    assert.equal(viewA.guard.guard, 'tripped')
+    assert.equal(viewA.guard.limit, 100_000, 'A 的预值')
+    assert.equal(viewA.guard.nanos, 120_000, 'A 的累计金额')
+    assert.equal(viewB.guard.guard, 'clear', 'B 完全没被拦')
+    assert.equal(viewB.guard.limit, 10_000_000, 'B 的预值')
+  })
+})
+
+test('花费预警：同一场会话、不同的 Session 实例，仍算同一场（按会话 id 记）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ agents: new Map([['s-id', fakeAgent('s-id')]]) })
+    apply(host.ctx, { log: false })
+    const agent = host.agents.get('s-id')
+    await host.post({ costLimit: 0.0001 }, host.withSession('s-id'))
+
+    // 真实宿主在不同回调里给的是**不同对象、同一串 id**：早先按对象当键，预值写在
+    // 一个实例上、判定时从另一个实例读，读到"没设"——表现就是"填了预值却不拦"。
+    const first = { id: 's-id' }
+    const second = { id: 's-id' }
+    host.emit(first, usageEvent({ inputTokens: 10, outputTokens: 0 }))
+    host.emit(second, usageEvent({ inputTokens: 50, outputTokens: 0 }))
+    assert.equal(agent.cancels.length, 1, '两笔要累加到同一场会话上，并越过预值')
+
+    // 弹窗（投影）拿到的也是"另一个实例"，仍要认得出来
+    const [, view] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=s-id`)
+    assert.equal(view.guard.nanos, 120_000, '按 id 累加，不按对象分家')
+    assert.equal(view.guard.limit, 100_000)
+
+    // 没带会话的写入必须被拒：绝不回退成"写一个全局值"
+    const [noSession] = await host.post({ costLimit: 5 })
+    assert.equal(noSession, 400)
+    assert.equal((await host.read(host.withSession('s-id'))).costLimit, 0.0001, '被拒的写入不该动到已有预值')
   })
 })
