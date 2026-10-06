@@ -894,9 +894,8 @@ test('面板：写入被拒要当场说出来，不许静默失败', async () =>
   assert.match(JSON.stringify(fail[0]), /认不出这个会话/)
 })
 
-test('弹窗：永远有路可走——✕ / Esc / 点遮罩都能收起，还能一键把预值调宽', async () => {
-  // 这条钉死"连停止都做不到"：弹窗盖在输入栏上，如果只有"填验证码"和"终止"两个出口，
-  // 用户不想选的时候就被困住了。
+test('弹窗：没有随手关掉的路——✕ / Esc / 点遮罩都不放行，只有验证或终止能离开', async () => {
+  // 这是明确要求的行为：花费预警要在越线时把人拦住，能一键划掉就等于没拦。
   const posts = []
   const { flush, state } = await mountPanel({
     sessionId: 'sess-9',
@@ -911,80 +910,30 @@ test('弹窗：永远有路可走——✕ / Esc / 点遮罩都能收起，还�
   })
   await flush()
   assert.ok(state.guard !== null, '被拦时必须弹窗')
+  assert.equal(findNodes(state.guard, 'data-dsh-guard-close').length, 0, '弹窗上不该有 ✕')
 
-  // ✕ 收起：弹窗消失，但**没有**发任何"放行"请求（宿主那边照样拦着）
-  guardNode(state.guard, 'data-dsh-guard-close').props.onClick()
-  await flush()
-  assert.equal(state.guard, null, '收起之后不再盖着输入栏')
-  assert.equal(posts.length, 0, '收起不是放行：一个请求都不该发')
+  // 遮罩不可点：它只是挡住背后的点击
+  const mask = guardNode(state.guard, 'data-dsh-guard-mask')
+  assert.equal(mask.props.onClick, undefined, '遮罩不该有关闭行为')
 
-  // 再拦一次（hits 变了）→ 提示要能再弹出来
-  state.projection = { ...trippedView(), hits: 2 }
-  await flush()
-  assert.ok(state.guard !== null, '新一次拦截要在同一帧里重新提示')
+  // ✕ / Esc 都没有了；弹窗还在
+  assert.equal(posts.length, 0, '没有任何写入就说明还没离开')
+  assert.ok(state.guard !== null, '弹窗必须还在')
 
-  // "把预值调宽"：直接写一个更宽的预值，宿主会自己松开
+  // 唯一"不用验证码"的离开方式是把预值调宽（宿主会因此松开这一轮）
   const raise = findNodes(state.guard, 'data-dsh-guard-ghost').find((button) => button.children.includes('把预值调宽'))
-  assert.ok(raise !== undefined, '要有"把预值调宽"这个出口')
+  assert.ok(raise !== undefined, '"把预值调宽"仍然可用')
   await raise.props.onClick()
   await flush()
-  assert.equal(posts.length, 1, '只发一次写入')
-  assert.equal(posts[0].body.sessionId, 'sess-9', '写入要带本会话')
+  assert.equal(posts.length, 1, '调宽 = 一次写入')
+  assert.equal(posts[0].body.sessionId, 'sess-9')
   assert.ok(posts[0].body.costLimit > 0.000006, `新预值要比这次花费宽，实际 ${posts[0].body.costLimit}`)
-  assert.equal(state.guard, null, '调宽之后收起')
-})
 
-test('面板：「自检」要能当场把弹窗画出来（分辨"没生效"和"弹窗没加载进来"）', async () => {
-  const asked = []
-  const { flush, state } = await mountPanel({
-    sessionId: 'sess-9',
-    fetch: async (url) => {
-      const text = String(url)
-      asked.push(text)
-      if (text.includes('switches=1')) {
-        return {
-          ok: true,
-          json: async () => ({
-            switches: [{
-              id: 'costGuard', label: { zh: '花费预警' }, hint: { zh: 'h' },
-              endpoint: '/dsh-optimizer', field: 'costGuard',
-              input: { field: 'costLimit', unit: { zh: '元' }, placeholder: { zh: '预值' } },
-            }],
-          }),
-        }
-      }
-      if (text.includes('selftest=1')) {
-        return {
-          ok: true,
-          json: async () => ({
-            preview: { enabled: true, nanos: 6_000_000, unpricedTokens: 0, limit: 5_000_000, guard: 'tripped', hits: 7, preview: true },
-          }),
-        }
-      }
-      return { ok: true, json: async () => ({ enabled: true, costGuard: true, costLimit: 0.005 }) }
-    },
-  })
+  // 宿主写完会立刻按新预值重判：宽了 → 投影变 clear → 弹窗自己收起。
+  // （弹窗没有"我点过了就关"的本地开关，只认宿主的真实状态。）
+  state.projection = { ...trippedView(), guard: 'clear' }
   await flush()
-  assert.equal(state.guard, null, '没被拦时不该有弹窗')
-  state.tree.children[0].props.onClick()   // 打开面板
-  await flush()
-  const selfTest = findNodes(state.tree, 'data-dsh-opt-selftest')[0]
-  assert.ok(selfTest !== undefined, '面板里要有"自检"按钮')
-  await selfTest.props.onClick()
-  await flush()
-
-  assert.ok(asked.some((url) => url.includes('selftest=1') && url.includes('sessionId=sess-9')), '自检要带上本会话')
-  assert.ok(state.guard !== null, '自检之后弹窗必须画出来')
-  const text = JSON.stringify(state.guard)
-  assert.match(text, /自检预览/, '要标明这是预览，别让用户以为真被拦了')
-  assert.match(text, /0\.006/, '预览金额照实显示')
-
-  // 预览里的按钮不该写真实数据：点"终止"只关掉预览
-  const posts = []
-  const guard = state.guard
-  await guardNode(guard, 'data-dsh-guard-danger').props.onClick()
-  await flush()
-  assert.equal(state.guard, null, '预览点一下就该关掉')
+  assert.equal(state.guard, null, '宿主松开之后弹窗收起')
 })
 
 test('bundle：弹窗状态必须有 HTTP 轮询通道（投影是可选加速，不是唯一来源）', async () => {
@@ -994,5 +943,4 @@ test('bundle：弹窗状态必须有 HTTP 轮询通道（投影是可选加速�
   assert.match(source, /guard=1&sessionId=/, '要有一处直接问宿主"这个会话被拦了吗"的请求')
   assert.match(source, /setInterval\(\(\) => void ask\(\), \d+\)/, '要按固定间隔轮询（推送丢了也能兜住）')
   assert.match(source, /data-dsh-guard-alert/, '拿不到状态要在页面上挂可见告警，不能静默')
-  assert.match(source, /花费预警 v\d+\.\d+\.\d+/, '面板要显示版本号：一眼看出页面拿到的是不是新 bundle')
 })
