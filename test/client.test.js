@@ -500,9 +500,9 @@ test('面板：点某一行会写回后端，并用返回值更新显示', async
 /** 一次"被拦下"的投影。金额用微元，和宿主下发的一致。 */
 const trippedView = (over = {}) => ({
   enabled: true,
-  micros: 6_000,
+  nanos: 6_000_000,
   unpricedTokens: 0,
-  limit: 5_000,
+  limit: 5_000_000,
   guard: 'tripped',
   hits: 1,
   ...over,
@@ -545,7 +545,7 @@ function guardNode(node, attribute) {
 }
 
 test('弹窗：没被拦时什么都不渲染', async () => {
-  const { state } = await mountPanel({ projection: { guard: 'clear', micros: 0, limit: 0, enabled: true } })
+  const { state } = await mountPanel({ projection: { guard: 'clear', nanos: 0, limit: 0, enabled: true } })
   assert.equal(state.guard, null, 'guard: clear 时不许弹窗')
   const { state: opened } = await mountPanel({ projection: undefined })
   assert.equal(opened.guard, null, '读不到投影时也不许弹窗')
@@ -564,8 +564,8 @@ test('弹窗：被拦时显示金额与预值，并给六个等距数字框', as
 
   // 金额按元显示（微元 / 1e6，四位小数），不是原始微元
   const text = JSON.stringify(root)
-  assert.match(text, /0\.0060/, '已花费要显示成 0.0060 元')
-  assert.match(text, /0\.0050/, '预值要显示成 0.0050 元')
+  assert.match(text, /0\.006/, '已花费要显示成 0.006 元')
+  assert.match(text, /0\.005/, '预值要显示成 0.005 元')
 
   const digits = findNodes(root, 'data-dsh-guard-digit')
   assert.equal(digits.length, 6, '必须是六个数字框')
@@ -684,14 +684,14 @@ test('弹窗：同一场会话再次被拦会换一组新数字（不能沿用�
   await flush()
   const firstCode = shownCode(state.guard)
 
-  state.projection = { ...first, hits: 2, micros: 12_000 }
+  state.projection = { ...first, hits: 2, nanos: 12_000_000 }
   await flush()
   const secondCode = shownCode(state.guard)
   assert.match(secondCode, /^[0-9]{6}$/, '再次被拦要有一组数字')
   assert.match(firstCode, /^[0-9]{6}$/, '第一组也必须是六位数字')
   // 概率上可能撞（1/1e6），撞了就再抽一次来验证"确实在重抽"这条路径存在
   if (firstCode === secondCode) {
-    state.projection = { ...first, hits: 3, micros: 18_000 }
+    state.projection = { ...first, hits: 3, nanos: 18_000_000 }
     await flush()
     const third = shownCode(state.guard)
     assert.match(third, /^[0-9]{6}$/)
@@ -718,7 +718,7 @@ test('弹窗：屏幕上的六位数字就是校验用的那六位（重画多�
   assert.match(shown, /^[0-9]{6}$/, '要有一组可抄的数字')
 
   // 中途宿主又报了一笔花费：金额变、hits 不变（还是同一轮拦截）
-  state.projection = { ...trippedView(), micros: 9_000 }
+  state.projection = { ...trippedView(), nanos: 9_000_000 }
   await flush()
   assert.equal(shownCode(state.guard), shown, '同一轮拦截里重画不许换数字')
 
