@@ -624,7 +624,7 @@ test('弹窗：填对六位数字才放行，填错只报错不发请求', async
   assert.deepEqual(posts[0].body, { guardAction: 'continue', sessionId: 'session-1' })
 })
 
-test('弹窗：终止要发 terminate，并把最初的提示词与清理指令摆出来', async () => {
+test('弹窗：终止只发 terminate，然后只把最初的提示词摆出来（没有任何删除指令）', async () => {
   const posts = []
   const { flush, state } = await mountPanel({
     sessionId: 'session-9',
@@ -632,7 +632,7 @@ test('弹窗：终止要发 terminate，并把最初的提示词与清理指令�
     fetch: async (url, init) => {
       if (init?.method === 'POST') {
         posts.push({ url: String(url), body: JSON.parse(String(init.body)) })
-        return { ok: true, json: async () => ({ guardAction: 'terminate', delivered: true, prompt: '给这个插件加个功能' }) }
+        return { ok: true, json: async () => ({ guardAction: 'terminate', terminated: true, prompt: '给这个插件加个功能' }) }
       }
       return { ok: true, json: async () => ({}) }
     },
@@ -641,12 +641,15 @@ test('弹窗：终止要发 terminate，并把最初的提示词与清理指令�
   await flush()
   assert.deepEqual(posts, [{ url: '/dsh-optimizer', body: { guardAction: 'terminate', sessionId: 'session-9' } }])
 
-  // 终止之后那一屏：最初的提示词 + 用户能看到的清理指令（与宿主真正下发的一致）
+  // 终止之后那一屏：说清已经停手、没有下删除指令，并把最初的提示词摆出来
   const text = JSON.stringify(state.guard)
-  assert.match(text, /给这个插件加个功能/)
-  assert.match(text, /删除本会话为这次任务产出的东西/)
-  assert.match(text, /拿不准某个文件是不是本次产出的，就不要删/)
+  assert.match(text, /给这个插件加个功能/, '必须回显本会话最初的提示词')
+  assert.match(text, /这一轮已经停住/)
+  assert.match(text, /没有.*删除指令/, '要明确告诉用户：插件没让模型删任何东西')
+  assert.doesNotMatch(text, /删除本会话为这次任务产出的东西/, '那套清理指令已经取消了')
+  assert.doesNotMatch(text, /拿不准某个文件是不是本次产出的/, '那套清理指令已经取消了')
   assert.doesNotMatch(text, /data-dsh-guard-digit/, '终止后不再要验证码')
+  assert.doesNotMatch(text, /data-dsh-guard-prompt[^]*清理/, '不再展示任何清理指令原文')
 })
 
 test('弹窗：宿主说没能唤醒时如实告诉用户，不要假装成功', async () => {
