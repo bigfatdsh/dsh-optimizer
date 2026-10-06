@@ -29,13 +29,18 @@ let loadCounter = 0
  * @returns {Promise<object>} `{ exports, host, document }`。
  */
 async function load(options = {}) {
+  globalThis.__INJECTED_STYLES__ = []
   const listeners = []
   const host = []
   globalThis.document = {
     documentElement: { lang: 'zh-CN' },
     head: { append: () => {} },
     getElementById: () => null,
-    createElement: () => ({ id: '', textContent: '' }),
+    createElement: () => {
+      const node = { id: '', textContent: '' }
+      globalThis.__INJECTED_STYLES__ = (globalThis.__INJECTED_STYLES__ ?? []).concat([node])
+      return node
+    },
     addEventListener: (type, fn, capture) => listeners.push({ type, fn, capture }),
     removeEventListener: () => {},
   }
@@ -232,6 +237,23 @@ function createRuntime() {
       cursor = 0
     },
   }
+}
+
+/**
+ * 取 apply 注入的那份样式文本。
+ *
+ * 样式节点是 `document.createElement('style')` 造出来的，`load()` 里把 `head.append`
+ * 换成了往 `styles` 数组里塞。这里直接读最后一份（每个用例各注入一次）。
+ *
+ * @param {Array} listeners - `load()` 返回的监听器数组（用不到，传进来只为保持签名一致）。
+ * @returns {string} 样式文本。
+ */
+function injectedStyle(listeners) {
+  void listeners
+  const styles = globalThis.__INJECTED_STYLES__ ?? []
+  assert.ok(styles.length > 0, 'apply 必须注入一份样式')
+  const last = styles[styles.length - 1]
+  return typeof last === 'string' ? last : last.textContent
 }
 
 /**
@@ -707,4 +729,44 @@ test('弹窗：屏幕上的六位数字就是校验用的那六位（重画多�
   await resume().props.onClick()
   await flush()
   assert.deepEqual(posts, [{ guardAction: 'continue', sessionId: 'session-1' }], '只发一次放行请求')
+})
+
+test('开关：度量与内置控件逐条对齐（这是"美术风格错位"的护栏）', async () => {
+  // 内置开关的度量写在 ui-primitives 的 Switch.module.css 里：36×20 药丸、2px 内边距、
+  // 16×16 圆滑块、打开时右移 16px。这两个数字一旦对不上，面板里的开关看起来就和旁边的
+  // 内置控件不是同一套东西，所以这里把形状与尺寸钉死。
+  //
+  // 只比形状与尺寸，不比颜色：颜色两边都以语义变量表达，换肤后自然一致；尺寸是实打实的
+  // 数字，写偏了一定看得出来。
+  const { exports, listeners } = await load()
+  const registered = []
+  exports.apply({
+    slots: {
+      inject: (_name, fn) => fn(),
+      register: (_options, component) => {
+        registered.push(component)
+        return () => {}
+      },
+    },
+  })
+  assert.equal(registered.length, 2)
+  const style = injectedStyle(listeners)
+  assert.match(style, /data-dsh-opt-track/, '样式里必须有开关规则')
+
+  const track = /\[data-dsh-opt-track\]\{([^}]*)\}/.exec(style)?.[1] ?? ''
+  const thumb = /\[data-dsh-opt-thumb\]\{([^}]*)\}/.exec(style)?.[1] ?? ''
+  const on = /\[data-dsh-opt-track\]\[data-on="1"\] \[data-dsh-opt-thumb\]\{([^}]*)\}/.exec(style)?.[1] ?? ''
+  assert.ok(track !== '' && thumb !== '' && on !== '', '开关的三条规则都要在样式里')
+
+  const value = (block, key) => new RegExp(`${key}:\\s*([^;}]*)`).exec(block)?.[1]?.trim()
+  assert.equal(value(track, 'width'), '36px', '轨道宽度要和内置一致')
+  assert.equal(value(track, 'height'), '20px', '轨道高度要和内置一致')
+  assert.equal(value(track, 'padding'), '2px', '轨道内边距要和内置一致')
+  assert.equal(value(track, 'border-radius'), '999px', '药丸圆角要和内置一致')
+  assert.equal(value(track, 'corner-shape'), 'round', '必须退出全局超椭圆圆角，否则胶囊形状不对')
+  assert.equal(value(thumb, 'width'), '16px', '滑块尺寸要和内置一致')
+  assert.equal(value(thumb, 'height'), '16px', '滑块尺寸要和内置一致')
+  assert.equal(value(thumb, 'corner-shape'), 'round', '滑块必须是正圆')
+  assert.equal(value(on, 'transform'), 'translateX(16px)', '打开时的位移要和内置一致')
+  assert.equal(value(on, 'background'), 'var(--dsw-alias-label-primary-foreground)', '打开时滑块用前景色，和内置一致')
 })
