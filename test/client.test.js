@@ -894,8 +894,8 @@ test('面板：写入被拒要当场说出来，不许静默失败', async () =>
   assert.match(JSON.stringify(fail[0]), /认不出这个会话/)
 })
 
-test('弹窗：没有随手关掉的路——✕ / Esc / 点遮罩都不放行，只有验证或终止能离开', async () => {
-  // 这是明确要求的行为：花费预警要在越线时把人拦住，能一键划掉就等于没拦。
+test('弹窗：没有随手关掉的路，也没有"调宽预值"的旁路——只有验证或终止能离开', async () => {
+  // 明确要求的行为：越线时就是要拦住人。✕ / Esc / 点遮罩 / 改预值的快捷按钮，一个都不留。
   const posts = []
   const { flush, state } = await mountPanel({
     sessionId: 'sess-9',
@@ -910,30 +910,23 @@ test('弹窗：没有随手关掉的路——✕ / Esc / 点遮罩都不放行�
   })
   await flush()
   assert.ok(state.guard !== null, '被拦时必须弹窗')
+
+  // 没有 ✕、没有第三个按钮、遮罩不可点
   assert.equal(findNodes(state.guard, 'data-dsh-guard-close').length, 0, '弹窗上不该有 ✕')
+  assert.equal(findNodes(state.guard, 'data-dsh-guard-ghost').length, 0, '不该有"调宽预值"这类旁路按钮')
+  assert.equal(guardNode(state.guard, 'data-dsh-guard-mask').props.onClick, undefined, '遮罩不该有关闭行为')
 
-  // 遮罩不可点：它只是挡住背后的点击
-  const mask = guardNode(state.guard, 'data-dsh-guard-mask')
-  assert.equal(mask.props.onClick, undefined, '遮罩不该有关闭行为')
+  // 只有两个按钮：终止任务（可点）与继续任务（填对验证码前禁用）
+  const danger = findNodes(state.guard, 'data-dsh-guard-danger')
+  const primary = findNodes(state.guard, 'data-dsh-guard-primary')
+  assert.equal(danger.length, 1, '要有终止任务')
+  assert.equal(danger[0].props.disabled, false, '终止任务随时可点')
+  assert.equal(primary.length, 1, '要有继续任务')
+  assert.equal(primary[0].props.disabled, true, '填对验证码之前不许继续')
 
-  // ✕ / Esc 都没有了；弹窗还在
-  assert.equal(posts.length, 0, '没有任何写入就说明还没离开')
-  assert.ok(state.guard !== null, '弹窗必须还在')
-
-  // 唯一"不用验证码"的离开方式是把预值调宽（宿主会因此松开这一轮）
-  const raise = findNodes(state.guard, 'data-dsh-guard-ghost').find((button) => button.children.includes('把预值调宽'))
-  assert.ok(raise !== undefined, '"把预值调宽"仍然可用')
-  await raise.props.onClick()
-  await flush()
-  assert.equal(posts.length, 1, '调宽 = 一次写入')
-  assert.equal(posts[0].body.sessionId, 'sess-9')
-  assert.ok(posts[0].body.costLimit > 0.000006, `新预值要比这次花费宽，实际 ${posts[0].body.costLimit}`)
-
-  // 宿主写完会立刻按新预值重判：宽了 → 投影变 clear → 弹窗自己收起。
-  // （弹窗没有"我点过了就关"的本地开关，只认宿主的真实状态。）
-  state.projection = { ...trippedView(), guard: 'clear' }
-  await flush()
-  assert.equal(state.guard, null, '宿主松开之后弹窗收起')
+  // 没按任何一个按钮 → 弹窗还在，也一个请求都没发
+  assert.equal(posts.length, 0, '不该发出任何写入')
+  assert.ok(state.guard !== null, '没有任何"随手关掉"能把它弄没')
 })
 
 test('bundle：弹窗状态必须有 HTTP 轮询通道（投影是可选加速，不是唯一来源）', async () => {
