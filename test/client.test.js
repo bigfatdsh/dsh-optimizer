@@ -30,6 +30,8 @@ let loadCounter = 0
  */
 async function load(options = {}) {
   globalThis.__INJECTED_STYLES__ = []
+  // 弹窗的兜底轮询在契约测试里关掉：定时器会把测试进程吊住（它在浏览器里才有意义）。
+  globalThis.__DSH_OPT_NO_POLL__ = true
   const listeners = []
   const host = []
   globalThis.document = {
@@ -933,4 +935,57 @@ test('弹窗：永远有路可走——✕ / Esc / 点遮罩都能收起，还�
   assert.equal(posts[0].body.sessionId, 'sess-9', '写入要带本会话')
   assert.ok(posts[0].body.costLimit > 0.000006, `新预值要比这次花费宽，实际 ${posts[0].body.costLimit}`)
   assert.equal(state.guard, null, '调宽之后收起')
+})
+
+test('面板：「自检」要能当场把弹窗画出来（分辨"没生效"和"弹窗没加载进来"）', async () => {
+  const asked = []
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    fetch: async (url) => {
+      const text = String(url)
+      asked.push(text)
+      if (text.includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [{
+              id: 'costGuard', label: { zh: '花费预警' }, hint: { zh: 'h' },
+              endpoint: '/dsh-optimizer', field: 'costGuard',
+              input: { field: 'costLimit', unit: { zh: '元' }, placeholder: { zh: '预值' } },
+            }],
+          }),
+        }
+      }
+      if (text.includes('selftest=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            preview: { enabled: true, nanos: 6_000_000, unpricedTokens: 0, limit: 5_000_000, guard: 'tripped', hits: 7, preview: true },
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ enabled: true, costGuard: true, costLimit: 0.005 }) }
+    },
+  })
+  await flush()
+  assert.equal(state.guard, null, '没被拦时不该有弹窗')
+  state.tree.children[0].props.onClick()   // 打开面板
+  await flush()
+  const selfTest = findNodes(state.tree, 'data-dsh-opt-selftest')[0]
+  assert.ok(selfTest !== undefined, '面板里要有"自检"按钮')
+  await selfTest.props.onClick()
+  await flush()
+
+  assert.ok(asked.some((url) => url.includes('selftest=1') && url.includes('sessionId=sess-9')), '自检要带上本会话')
+  assert.ok(state.guard !== null, '自检之后弹窗必须画出来')
+  const text = JSON.stringify(state.guard)
+  assert.match(text, /自检预览/, '要标明这是预览，别让用户以为真被拦了')
+  assert.match(text, /0\.006/, '预览金额照实显示')
+
+  // 预览里的按钮不该写真实数据：点"终止"只关掉预览
+  const posts = []
+  const guard = state.guard
+  await guardNode(guard, 'data-dsh-guard-danger').props.onClick()
+  await flush()
+  assert.equal(state.guard, null, '预览点一下就该关掉')
 })
