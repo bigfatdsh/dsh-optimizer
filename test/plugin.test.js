@@ -674,7 +674,7 @@ test('花费预警：查询串认会话，认不出就 400（不能把状态记�
   })
 })
 
-test('花费预警：验证通过 → 唤醒；终止 → 回显最初的提示词 + 下达删除本会话产出的指令', async () => {
+test('花费预警：验证通过 → 唤醒；终止 → 只停手并回显最初的提示词（不下发任何指令）', async () => {
   await withTempHome(async () => {
     const agent = fakeAgent('s-cmd')
     const host = fakeHost({ agents: new Map([['s-cmd', agent]]) })
@@ -694,18 +694,15 @@ test('花费预警：验证通过 → 唤醒；终止 → 回显最初的提示�
     assert.equal(typeof followup.id, 'string')
     assert.equal(followup.reasoningEffort, undefined, '推理等级由会话自己保持，插件不许改')
 
-    // 终止：停手 → 等到空闲 → 下达删除指令 → 回显最初的提示词。
+    // 终止：只停手 + 回显最初的提示词。**一条指令都不下**——尤其不下"删除本会话产出的内容"。
     agent.status = 'running'
+    const beforeCount = agent.followups.length
     const [endStatus, endBody] = await host.post({ guardAction: 'terminate', sessionId: 's-cmd' })
     assert.equal(endStatus, 200)
     assert.equal(endBody.terminated, true)
     assert.equal(endBody.prompt, '重写鉴权模块', '终止那一屏要回显最初的提示词')
-    assert.equal(endBody.delivered, true, '删除指令要真的下发')
-    assert.equal(agent.followups.length, 2, '继续一条 + 删除一条')
-    const cleanup = agent.followups.at(-1).content[0].text
-    assert.match(cleanup, /删除本会话为这次任务产出的东西/, '要下达删除本会话产出的指令')
-    assert.match(cleanup, /用户原有的文件/, '要划清边界：用户原有的文件不动')
-    assert.match(cleanup, /拿不准某个文件是不是本次产出的，就不要删/, '拿不准的要问用户')
+    assert.equal(agent.followups.length, beforeCount, '终止不许再给模型下任何消息')
+    assert.doesNotMatch(JSON.stringify(endBody), /删除|delete/i, '响应里也不该有"删除"这回事')
     assert.equal(agent.cancels.at(-1).options.keepInbox, true, '终止只停手：队列里的活儿保留')
     assert.equal(agent.cancels.at(-1).cause.reason, 'optimizer:cost-guard-terminate')
 
@@ -919,8 +916,7 @@ test('花费预警：三个出口都要真的走得通（继续＝放行一步�
     const before = agent.followups.length     // 「继续」已经下发过一条，终止不该再多任何一条
     const [, ended] = await host.post({ guardAction: 'terminate', sessionId: 's-exit' })
     assert.equal(ended.terminated, true)
-    assert.equal(agent.followups.length, before + 1, '终止要多下发一条删除指令')
-    assert.match(agent.followups.at(-1).content[0].text, /删除本会话为这次任务产出的东西/)
+    assert.equal(agent.followups.length, before, '终止不下发任何消息')
     assert.deepEqual(await next(), { kind: 'enter' }, '终止之后用户还能继续用这个会话')
   })
 })
