@@ -894,3 +894,43 @@ test('面板：写入被拒要当场说出来，不许静默失败', async () =>
   assert.match(JSON.stringify(fail[0]), /没存上/)
   assert.match(JSON.stringify(fail[0]), /认不出这个会话/)
 })
+
+test('弹窗：永远有路可走——✕ / Esc / 点遮罩都能收起，还能一键把预值调宽', async () => {
+  // 这条钉死"连停止都做不到"：弹窗盖在输入栏上，如果只有"填验证码"和"终止"两个出口，
+  // 用户不想选的时候就被困住了。
+  const posts = []
+  const { flush, state } = await mountPanel({
+    sessionId: 'sess-9',
+    projection: trippedView(),
+    fetch: async (url, init) => {
+      if (init?.method === 'POST') {
+        posts.push({ url: String(url), body: JSON.parse(String(init.body)) })
+        return { ok: true, json: async () => ({ costLimit: 0.000024, costGuard: true }) }
+      }
+      return { ok: true, json: async () => ({}) }
+    },
+  })
+  await flush()
+  assert.ok(state.guard !== null, '被拦时必须弹窗')
+
+  // ✕ 收起：弹窗消失，但**没有**发任何"放行"请求（宿主那边照样拦着）
+  guardNode(state.guard, 'data-dsh-guard-close').props.onClick()
+  await flush()
+  assert.equal(state.guard, null, '收起之后不再盖着输入栏')
+  assert.equal(posts.length, 0, '收起不是放行：一个请求都不该发')
+
+  // 再拦一次（hits 变了）→ 提示要能再弹出来
+  state.projection = { ...trippedView(), hits: 2 }
+  await flush()
+  assert.ok(state.guard !== null, '新一次拦截要在同一帧里重新提示')
+
+  // "把预值调宽"：直接写一个更宽的预值，宿主会自己松开
+  const raise = findNodes(state.guard, 'data-dsh-guard-ghost').find((button) => button.children.includes('把预值调宽'))
+  assert.ok(raise !== undefined, '要有"把预值调宽"这个出口')
+  await raise.props.onClick()
+  await flush()
+  assert.equal(posts.length, 1, '只发一次写入')
+  assert.equal(posts[0].body.sessionId, 'sess-9', '写入要带本会话')
+  assert.ok(posts[0].body.costLimit > 0.000006, `新预值要比这次花费宽，实际 ${posts[0].body.costLimit}`)
+  assert.equal(state.guard, null, '调宽之后收起')
+})
