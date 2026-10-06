@@ -7,12 +7,16 @@
 #     所有会话、所有子代理上一致生效；只挂一次也就只判一次，不随会话数增长。
 #   * 精简化段落要在所有 preset 上一致生效，且恒定排在提示词最后（order 10200），
 #     开关不变时逐字节稳定，不产生额外缓存失效。
+#   * 花费预警的监听（`session/event` 折钱、`agent/pre-step` 兜底）同理：花费只按
+#     会话记一份，装一次就够；多挂几个反而会重复拦。
 #
 # 默认值：
 #   * autoDefault: true     —— 推理等级 auto 默认开启；在「优化」面板里可关。
 #   * conciseDefault: false —— 精简化输出默认关闭；在「优化」面板里点一下即开。
-#     两者都记在 <DSH_HOME>/optimizer.json 里（persist: true 时），重启后保持。
-#   * log: false            —— 排查"到底判成什么档位"时改成 true。
+#   * costGuardDefault: false —— 花费预警默认**关闭**（要花钱的事，默认不设限）。
+#   * costLimitDefault: 0   —— 预值（元）默认 0 = 不限；在面板的开关标题后面填。
+#     四个值都记在 <DSH_HOME>/optimizer.json 里（persist: true 时），重启后保持。
+#   * log: false            —— 排查"到底判成什么档位 / 拦没拦"时改成 true。
 
 - insert:
     - id: concise
@@ -20,5 +24,7 @@
       config:
         autoDefault: true
         conciseDefault: false
+        costGuardDefault: false
+        costLimitDefault: 0
         persist: true
         log: false
