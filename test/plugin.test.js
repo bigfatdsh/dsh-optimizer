@@ -633,7 +633,7 @@ test('花费预警：查询串认会话，认不出就 400（不能把状态记�
   })
 })
 
-test('花费预警：验证通过 → 唤醒（推理等级一个字都不动）；终止 → 下清理指令并永久停手', async () => {
+test('花费预警：验证通过 → 唤醒（推理等级一个字都不动）；终止 → 只回显最初的提示词、不下删除指令', async () => {
   await withTempHome(async () => {
     const agent = fakeAgent('s-cmd')
     const host = fakeHost({ agents: new Map([['s-cmd', agent]]) })
@@ -653,13 +653,18 @@ test('花费预警：验证通过 → 唤醒（推理等级一个字都不动）
     assert.equal(typeof followup.id, 'string')
     assert.equal(followup.reasoningEffort, undefined, '推理等级由会话自己保持，插件不许改')
 
-    // 终止：下清理指令，并且之后不再拦（已经结束了）
+    // 终止：停手 + 把最初的提示词交回来。**一条指令都不下**——模型不该收到任何
+    // "删掉本会话产出的东西"之类的话，删什么是用户的决定。
+    agent.status = 'running'
     const [endStatus, endBody] = await host.post({ guardAction: 'terminate', sessionId: 's-cmd' })
     assert.equal(endStatus, 200)
-    assert.equal(endBody.delivered, true)
+    assert.equal(endBody.terminated, true)
     assert.equal(endBody.prompt, '重写鉴权模块', '终止那一屏要回显最初的提示词')
-    assert.match(agent.followups[1].content[0].text, /删除本会话为这次任务产出的东西/)
-    assert.match(agent.followups[1].content[0].text, /拿不准某个文件是不是本次产出的，就不要删/)
+    assert.equal(agent.followups.length, 1, '终止不许再给模型下任何消息')
+    assert.equal(agent.cancels.at(-1).options.keepInbox, true, '终止只停手：队列里的活儿保留')
+    assert.equal(agent.cancels.at(-1).cause.reason, 'optimizer:cost-guard-terminate')
+
+    assert.doesNotMatch(JSON.stringify(endBody), /删|delete/i, '响应里不该再有"删除"这回事')
 
     const [, after] = await host.request('GET', `${ROUTE_PATH}?guard=1&sessionId=s-cmd`)
     assert.equal(after.guard.guard, 'terminated')
