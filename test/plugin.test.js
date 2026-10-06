@@ -920,3 +920,28 @@ test('花费预警：三个出口都要真的走得通（继续＝放行一步�
     assert.deepEqual(await next(), { kind: 'enter' }, '终止之后用户还能继续用这个会话')
   })
 })
+
+test('花费预警：自检端点给出"现在被拦会是什么样"，且不改任何状态', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ agents: new Map([['s-self', fakeAgent('s-self')]]) })
+    apply(host.ctx, { log: false })
+    const agent = host.agents.get('s-self')
+    await host.post({ costLimit: 0.01 }, host.withSession('s-self'))
+    host.emit(agent.session, usageEvent({ inputTokens: 100, outputTokens: 0 }))   // 0.0002 元，没到 0.01
+
+    const before = (await host.read(`${ROUTE_PATH}?guard=1&sessionId=s-self`)).guard
+    assert.equal(before.guard, 'clear', '先确认它没被拦')
+
+    const [, self] = await host.request('GET', `${ROUTE_PATH}?selftest=1&sessionId=s-self`)
+    assert.equal(self.preview.preview, true, '预览要自带标记')
+    assert.equal(self.preview.guard, 'tripped', '预览按"被拦"的样子给数据')
+    assert.equal(self.preview.limit, 10_000_000, '预值照实给')
+    assert.ok(self.preview.nanos > self.preview.limit, '预览金额要越线，界面上才画得出完整弹窗')
+
+    // 自检**不许**改状态：还是没被拦、也不该取消 agent
+    const after = (await host.read(`${ROUTE_PATH}?guard=1&sessionId=s-self`)).guard
+    assert.equal(after.guard, 'clear', '自检不许把会话标成被拦')
+    assert.equal(agent.cancels.length, 0, '自检不许去停 agent')
+    assert.deepEqual(await host.fire('agent/pre-step', { agent, messages: [userMessage('继续')], turn: 2, step: 1 }, async () => ({ kind: 'enter' })), { kind: 'enter' })
+  })
+})
