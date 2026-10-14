@@ -54,7 +54,7 @@ const systemPromptModule = await load('@deepseek-ai/dsh-system-prompt')
 const toolsModule = await load('@deepseek-ai/dsh-tools')
 const plugin = await import(new URL('../lib/index.js', import.meta.url).href)
 
-console.log(`真宿主：${RUNTIME}`)
+console.log(`真宿主：${RUNTIME}（配置：${process.argv.includes('--defaults') ? '本机 profile 那一行' : '全开'}）`)
 console.log(`临时 DSH_HOME：${home}\n`)
 
 /** 一个最小的 webServer 替身：插件的 `inject` 里有它，缺了 fiber 会一直等。 */
@@ -77,8 +77,15 @@ ctx.plugin(toolsModule.default ?? toolsModule)
 ctx.plugin(FakeWebServer)
 await new Promise((resolve) => setTimeout(resolve, 80))
 
+// `--defaults` 用**本机 desktop profile 里那一行真实配置**（不含任何新键）跑一遍，
+// 验证"老配置 + 新插件"这条路不会因为缺键而崩。默认跑"全开"那一档。
+const useDefaults = process.argv.includes('--defaults')
+const pluginConfig = useDefaults
+  ? { autoDefault: true, conciseDefault: false, costGuardDefault: false, costLimitDefault: 0, persist: true, log: false }
+  : { log: false, lazyToolsDefault: true }
+
 // **真实的加载路径**：cordis 的 fiber，而不是裸调 apply()。
-const fiber = ctx.plugin(plugin, { log: false, lazyToolsDefault: true })
+const fiber = ctx.plugin(plugin, pluginConfig)
 await new Promise((resolve) => setTimeout(resolve, 120))
 
 console.log(`插件 fiber 状态：${fiber?.state?.name ?? 'unknown'}\n`)
@@ -111,17 +118,18 @@ await check('纪律段落的英文正文出现在真实装配结果里', async (
   const text = assembly.sections.map((section) => section.text).join('\n')
   assert.match(text, /Tool batching/)
   assert.match(text, /retry_tool/)
-  assert.match(text, /Tool disclosure/)
+  // 按需加载说明只在那个开关打开时出现——`--defaults` 那一档它**必须缺席**。
+  assert.equal(/Tool disclosure/.test(text), !useDefaults)
 })
 
-await check('真实 tools 服务接受了两个工具定义（schema 校验通过）', () => {
+await check('真实 tools 服务接受了本插件注册的工具（schema 校验通过）', () => {
   const names = ctx.tools.schemas().map((schema) => schema.name)
   assert.ok(names.includes('retry_tool'), `工具：${names.join(', ')}`)
-  assert.ok(names.includes('load_tools'), `工具：${names.join(', ')}`)
+  assert.equal(names.includes('load_tools'), useDefaults === false, `工具：${names.join(', ')}`)
 })
 
-await check('两个工具的定义形状完整（register 的前置条件）', () => {
-  for (const name of ['retry_tool', 'load_tools']) {
+await check('工具定义形状完整（register 的前置条件）', () => {
+  for (const name of useDefaults ? ['retry_tool'] : ['retry_tool', 'load_tools']) {
     const tool = ctx.tools.get(name)
     assert.equal(typeof tool?.output?.render, 'function', `${name}.output.render`)
     assert.equal(typeof tool?.execute, 'function', `${name}.execute`)
@@ -130,6 +138,7 @@ await check('两个工具的定义形状完整（register 的前置条件）', (
 })
 
 await check('load_tools 的取回路径在真宿主上真的能用（列出 → 解锁）', async () => {
+  if (useDefaults) return
   const agent = { id: 'live-agent', session: { id: 'live-agent', requestHeader: () => ({ config: {} }) } }
   const toolsSvc = ctx.get('tools')
   const listed = await toolsSvc.get('load_tools').execute({ list: true }, { agent, signal: liveSignal })
@@ -153,6 +162,7 @@ await check('真 ToolRuntime 上跑一次 execute：长结果被裁、全文可�
 })
 
 await check('按需加载的过滤在真装配里生效：核心工具留下，其余被挡', async () => {
+  if (useDefaults) return
   const probeAgent = { id: 'other-agent', session: { id: 'other-agent', requestHeader: () => ({ config: {} }) } }
   const assembly = await ctx.systemPrompt.assemble({ scope: probeAgent })
   const names = assembly.tools.map((schema) => schema.name)
