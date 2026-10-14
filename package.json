@@ -1,22 +1,21 @@
 {
   "name": "dsh-optimizer",
-  "version": "5.0.0",
+  "version": "4.8.0",
   "private": true,
   "type": "module",
-  "description": "优化插件集：把省 token 的开关收在输入栏右侧的「优化」面板里，共十个开关。执行侧：并行工具调用纪律、失败重放（只发改动字段）、复读抑制、按任务换档；上下文侧：工具结果发送前上限+落盘、不动已发内容（让内置裁剪器无事可做）、工具说明按需加载、提前自动压缩；另有精简化输出与花费预警。所有失败方向都是\"原样工作\"，不会让请求失败。",
+  "description": "优化插件集：把省 token 的开关收在输入栏右侧的「优化」面板里。含「推理等级 auto」（每个请求按轻重自动选该模型真实支持的推理档位，手选优先、判不出就透传）、「精简化输出」（系统提示词最后追加一段输出纪律，任务内容一字不改）与「花费预警」（本会话花费到预值就停住这一轮，弹窗要先验证六位数字才放行；选终止则让模型删掉本会话产出的内容）。",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
+    "reasoning",
+    "reasoning-effort",
+    "thinking",
+    "auto",
     "token",
     "cost",
-    "optimizer",
-    "parallel-tool-calls",
-    "retry",
-    "context",
-    "compaction",
-    "prompt-cache",
-    "lazy-tools",
+    "budget",
+    "cost-guard",
     "guard"
   ],
   "license": "MIT",
@@ -28,15 +27,20 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib",
+    "lib/index.js",
+    "lib/client.js",
+    "lib/budget.js",
+    "lib/classify.js",
+    "lib/efforts.js",
+    "lib/schema.js",
+    "lib/state.js",
+    "lib/directive.js",
     "cordis.patch.yml",
-    "README.md",
-    "bench-report.md",
-    "bench-report.json"
+    "README.md"
   ],
   "meta": {
     "title": "优化插件集",
-    "description": "十个开关，全部挂在宿主公开契约的钩子上：并行纪律、失败重放、结果上限、不动已发内容、复读抑制、按需加载、提前压缩、按任务换档、精简化输出、花费预警。没有一处包住模型调用。"
+    "description": "推理等级 auto + 精简化输出 + 花费预警，一个面板三个开关；所有失败方向都是\"原样工作\"，不会让请求失败。"
   },
   "dsh": {
     "bundle": {
@@ -50,9 +54,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
-    "verify": "node tools/verify-client-bundle.mjs",
-    "bench": "node tools/bench.mjs",
-    "live": "node tools/live-verify.mjs"
+    "test": "node --test test/classify.test.js test/efforts.test.js test/budget.test.js test/plugin.test.js test/client.test.js",
+    "verify": "node tools/verify-client-bundle.mjs"
   }
 }
