@@ -372,7 +372,7 @@ function benchLazy() {
       after: size(visible) + index.length,
       unit: 'chars',
       kind: 'measured',
-      note: `隐藏 ${hidden.length} 个，改用一个 ${index.length} 字符的索引；索引只在调用 list 时进上下文`,
+      note: `隐藏 ${hidden.length} 个，改用一个 ${index.length} 字符的索引；索引只在调用 list 时进上下文。平均 ${Math.round(size(schemas) / schemas.length)} 字符/工具，按自己那张表线性放大即可；面板里的 optimizations.toolSchemaChars 是这台机器上的真实值`,
     }),
     row({
       feature: '按需加载',
@@ -381,7 +381,7 @@ function benchLazy() {
       after: tokens(size(visible)),
       unit: 'token',
       kind: 'measured',
-      note: `净省 ≈ ${tokens(size(schemas) - size(visible))} token/轮（索引本身不进每轮请求，只在 list 时产生）`,
+      note: `净省 ≈ ${tokens(size(schemas) - size(visible))} token/轮（13 个真实形状的工具；索引本身不进每轮请求，只在 list 时产生）`,
     }),
   ]
   return rows
