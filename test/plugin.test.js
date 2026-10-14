@@ -13,7 +13,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ROUTE_PATH, SECTION_NAME, SECTION_ORDER, apply, inject, name } from '../lib/index.js'
-import { DISCIPLINE_SECTION } from '../lib/optimize.js'
 import { statePath } from '../lib/state.js'
 import { DIRECTIVE, resolveDirective } from '../lib/directive.js'
 
@@ -189,24 +188,19 @@ test('清单：名字、依赖与端点', async () => {
 test('段落：恒定注册，名字唯一、位置在最后', () => {
   const host = fakeHost()
   apply(host.ctx, { log: false })
-  const concise = host.sections.find((section) => section.name === SECTION_NAME)
-  assert.ok(concise, '精简化段落必须注册')
-  assert.equal(concise.name, 'optimizer:concise', '名字不能借用别人的（撞名会被宿主拒绝，整个插件被丢弃）')
-  assert.equal(concise.order, SECTION_ORDER)
+  assert.equal(host.sections.length, 1, '必须注册且只注册一段')
+  assert.equal(host.sections[0].name, SECTION_NAME)
+  assert.equal(host.sections[0].name, 'optimizer:concise', '名字不能借用别人的（撞名会被宿主拒绝，整个插件被丢弃）')
+  assert.equal(host.sections[0].order, SECTION_ORDER)
   assert.ok(SECTION_ORDER >= 10000, '必须排在系统提示词最后，不动前面段落的前缀缓存')
-  assert.equal(typeof concise.text, 'function', 'text 必须是函数：每次装配前重新求值')
-  // 纪律段落必须排在精简化**之前**：最后一段仍然是精简化，前缀才稳定。
-  const discipline = host.sections.find((section) => section.name === DISCIPLINE_SECTION)
-  assert.ok(discipline, '纪律段落必须注册')
-  assert.ok(discipline.order < SECTION_ORDER, '纪律段落必须排在精简化之前')
-  assert.equal(new Set(host.sections.map((section) => section.name)).size, host.sections.length, '段落名必须两两不同')
+  assert.equal(typeof host.sections[0].text, 'function', 'text 必须是函数：每次装配前重新求值')
 })
 
 test('注入内容：关闭是空串（不占 token），开启是完整指令', async () => {
   await withTempHome(async () => {
     const host = fakeHost()
     apply(host.ctx, { conciseDefault: false, log: false })
-    const text = () => host.sections.find((section) => section.name === SECTION_NAME).text()
+    const text = () => host.sections[0].text()
     assert.equal(text(), '', '默认关闭：宿主会丢弃整段')
     await host.post({ enabled: true })
     assert.equal(text(), DIRECTIVE, '开启后注入的就是那段指令')
@@ -223,14 +217,8 @@ test('开关：GET 报状态与登记表，POST 写入并回报', async () => {
     const initial = await host.read()
     assert.equal(initial.enabled, true, 'conciseDefault: true 时首次就是开')
     // 面板读的是登记表：三个开关，各一个字段，字段名不能重复。
-    assert.deepEqual(
-      initial.switches.map((item) => item.field),
-      ['auto', 'enabled', 'costGuard', 'parallel', 'retry', 'resultCap', 'cacheSafe', 'repeatGuard', 'lazyTools', 'autoCompact', 'modelTier'],
-    )
-    assert.deepEqual(
-      initial.switches.map((item) => item.endpoint),
-      new Array(initial.switches.length).fill(ROUTE_PATH),
-    )
+    assert.deepEqual(initial.switches.map((item) => item.field), ['auto', 'enabled', 'costGuard'])
+    assert.deepEqual(initial.switches.map((item) => item.endpoint), [ROUTE_PATH, ROUTE_PATH, ROUTE_PATH])
     assert.equal(initial.auto, true, 'autoDefault 默认开')
     assert.equal(initial.config.section, SECTION_NAME)
 
@@ -301,7 +289,7 @@ test('持久化：盘上文件坏掉时退回默认值，不抛错', async () =>
 test('缺少服务时不炸：没有 webServer 就没有开关，段落照旧注册', () => {
   const host = fakeHost({ withWebServer: false })
   assert.doesNotThrow(() => apply(host.ctx, { log: true }))
-  assert.equal(host.sections.length, 2, '两段都注册，不受 webServer 缺失影响')
+  assert.equal(host.sections.length, 1, '段落注册不受影响')
   assert.ok(host.logs.some((line) => line.includes('webServer unavailable')))
 })
 
@@ -325,7 +313,7 @@ test('统计：只记数字，装配次数与注入次数都对得上', async ()
   await withTempHome(async () => {
     const host = fakeHost()
     const handle = apply(host.ctx, { conciseDefault: false, log: false })
-    const text = () => host.sections.find((section) => section.name === SECTION_NAME).text()
+    const text = () => host.sections[0].text()
     text()
     text()
     await host.post({ enabled: true })
